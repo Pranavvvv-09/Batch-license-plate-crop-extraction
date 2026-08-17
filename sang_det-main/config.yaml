@@ -153,7 +153,7 @@ labeler:
   # Enable/disable NVIDIA NIM automatic OCR plate labeling.
   enabled: true
   # NVIDIA NIM API key. Can also be provided via NVIDIA_API_KEY environment variable.
-  api_key: "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,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,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"
+  api_key: ""
   # NVIDIA NIM API endpoint (OpenAI compatible).
   base_url: "https://integrate.api.nvidia.com/v1"
   # Default NVIDIA Vision / Reasoning model.
