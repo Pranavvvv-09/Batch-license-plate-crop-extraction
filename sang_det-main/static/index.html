@@ -1296,10 +1296,10 @@ https://example.com/traffic-cam.mp4"></textarea>
   };
 
   // Lightbox modal preview
-  window.openPlateModal = (plateId, filename, plateText) => {
+  window.openPlateModal = (plateId, filename, plateText, storageUrl) => {
     currentModalPlateId = plateId;
     $("modalTitle").textContent = `Plate #${plateId} — ${filename}`;
-    $("modalImg").src = `/api/plates/file/${encodeURIComponent(filename)}`;
+    $("modalImg").src = storageUrl || `/api/plates/file/${encodeURIComponent(filename)}`;
     $("modalPlateInput").value = plateText || "";
     $("imgModal").style.display = "flex";
   };
@@ -1420,10 +1420,10 @@ https://example.com/traffic-cam.mp4"></textarea>
     try {
       const { plates } = await api("/api/plates/recent?limit=18");
       $("thumbs").innerHTML = plates.length ? plates.map((p) => `
-        <div class="thumb" onclick="openPlateModal(${p.id}, '${esc(p.filename)}', '${esc(p.plate_text || '')}')">
+        <div class="thumb" onclick="openPlateModal(${p.id}, '${esc(p.filename)}', '${esc(p.plate_text || '')}', '${esc(p.storage_url || '')}')">
           ${p.plate_text ? `<div class="plate-tag">${esc(p.plate_text)}</div>` : ''}
-          <img loading="lazy" src="/api/plates/file/${encodeURIComponent(p.filename)}" alt="plate crop">
-          <div class="meta" title="${esc(p.filename)}">v${p.video_id} · ${dur(p.timestamp_s)} · ${(p.confidence * 100).toFixed(0)}%</div>
+          <img loading="lazy" src="${esc(p.storage_url || `/api/plates/file/${encodeURIComponent(p.filename)}`)}" alt="plate crop">
+          <div class="meta" title="${esc(p.filename)}">v${p.video_id || 'manual'} · ${dur(p.timestamp_s)} · ${(p.confidence * 100).toFixed(0)}%</div>
         </div>`).join("")
         : '<div class="empty" style="grid-column:1/-1">No crops saved yet.</div>';
     } catch {}
@@ -1493,11 +1493,12 @@ https://example.com/traffic-cam.mp4"></textarea>
       tbody.innerHTML = data.items.map((p) => {
         const textVal = p.plate_text || "";
         const statusCls = p.ocr_status === "labeled" ? "labeled" : (p.ocr_status === "error" ? "error" : "unlabeled");
+        const imgSrc = p.storage_url || `/api/plates/file/${encodeURIComponent(p.filename)}`;
         return `<tr>
           <td class="num muted">${p.id}</td>
           <td>
-            <img src="/api/plates/file/${encodeURIComponent(p.filename)}" class="plate-img-cell"
-                 onclick="openPlateModal(${p.id}, '${esc(p.filename)}', '${esc(textVal)}')" title="Click to enlarge" />
+            <img src="${esc(imgSrc)}" class="plate-img-cell" loading="lazy"
+                 onclick="openPlateModal(${p.id}, '${esc(p.filename)}', '${esc(textVal)}', '${esc(p.storage_url || '')}')" title="Click to enlarge" />
           </td>
           <td>
             <div class="plate-input-cell">
