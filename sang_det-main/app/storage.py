@@ -39,6 +39,24 @@ class SaveResult:
 # ------------------------------------------------------------- Supabase Storage
 
 
+_http_client: httpx.Client | None = None
+_http_client_lock = threading.Lock()
+
+
+def get_http_client() -> httpx.Client:
+    """Return a thread-safe connection-pooled HTTP client."""
+    global _http_client
+    if _http_client is None or _http_client.is_closed:
+        with _http_client_lock:
+            if _http_client is None or _http_client.is_closed:
+                _http_client = httpx.Client(
+                    timeout=httpx.Timeout(30.0, connect=10.0),
+                    limits=httpx.Limits(max_keepalive_connections=20, max_connections=50),
+                    follow_redirects=True,
+                )
+    return _http_client
+
+
 def is_supabase_storage_enabled(cfg: Config | None = None) -> bool:
     c = cfg or load_config()
     url = str(c.get("supabase.url") or "").strip()
@@ -77,17 +95,17 @@ def upload_to_supabase_storage(
     }
 
     try:
-        with httpx.Client(timeout=30.0) as client:
-            resp = client.post(upload_endpoint, content=image_bytes, headers=headers)
-            if resp.status_code in (200, 201):
-                public_url = get_supabase_public_url(filename, c)
-                return public_url
-            else:
-                log.warning(
-                    "Supabase storage upload failed for %s (status %d): %s",
-                    filename, resp.status_code, resp.text[:200],
-                )
-                return None
+        client = get_http_client()
+        resp = client.post(upload_endpoint, content=image_bytes, headers=headers)
+        if resp.status_code in (200, 201):
+            public_url = get_supabase_public_url(filename, c)
+            return public_url
+        else:
+            log.warning(
+                "Supabase storage upload failed for %s (status %d): %s",
+                filename, resp.status_code, resp.text[:200],
+            )
+            return None
     except Exception as exc:
         log.warning("Supabase storage upload error for %s: %s", filename, exc)
         return None
@@ -112,10 +130,10 @@ def fetch_image_bytes(
     url = storage_url or (get_supabase_public_url(filename, c) if is_supabase_storage_enabled(c) else None)
     if url:
         try:
-            with httpx.Client(timeout=30.0) as client:
-                resp = client.get(url)
-                if resp.status_code == 200:
-                    return resp.content
+            client = get_http_client()
+            resp = client.get(url)
+            if resp.status_code == 200:
+                return resp.content
         except Exception as exc:
             log.warning("Failed fetching image from Supabase Storage (%s): %s", url, exc)
 

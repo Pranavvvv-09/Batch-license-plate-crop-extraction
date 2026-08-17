@@ -250,6 +250,53 @@ class TestLabeler(unittest.TestCase):
             stats = db.get_label_stats()
             self.assertEqual(stats["total_plates"], 0)
 
+    def test_rate_limiter(self):
+        """Test rate limiter pacing and backoff penalty mechanism."""
+        limiter = labeler.RateLimiter(rps=100.0, min_delay_s=0.01)
+        limiter.wait()
+        self.assertEqual(limiter.rate_limit_hits, 0)
+
+        # Trigger rate limit penalty
+        limiter.report_rate_limit(0.05)
+        self.assertEqual(limiter.rate_limit_hits, 1)
+        t0 = labeler.time.time()
+        limiter.wait()
+        elapsed = labeler.time.time() - t0
+        self.assertGreaterEqual(elapsed, 0.04)
+
+    @patch.object(labeler.NimLabeler, "scan_plate_record")
+    def test_batch_labeler_queue_and_resumption(self, mock_scan):
+        """Test queue-based batch processing, memory safety, and resuming."""
+        def fake_scan(plate_id, api_key=None):
+            db.update_plate_label(plate_id, "RESUME 100", ocr_status="labeled")
+            return labeler.ScanResult(ok=True, plate_text="RESUME 100")
+        mock_scan.side_effect = fake_scan
+
+
+        # Create 3 test plates (2 unlabeled, 1 already labeled)
+        p1 = db.record_custom_plate(filename="batch_p1.jpg", plate_text=None, ocr_status="unlabeled")
+        p2 = db.record_custom_plate(filename="batch_p2.jpg", plate_text="ALREADY LABELED", ocr_status="labeled")
+        p3 = db.record_custom_plate(filename="batch_p3.jpg", plate_text=None, ocr_status="unlabeled")
+
+        try:
+            batch = labeler.BatchLabeler()
+            batch._run_batch(limit=10, force_all=False, retry_errors=True, api_key="nvapi-mock-test")
+
+            st = batch.status()
+            self.assertEqual(st["processed"], 2)  # Only processed the 2 unlabeled ones!
+            self.assertEqual(st["succeeded"], 2)
+
+            # Check that p1 and p3 were updated
+            plate1 = db.get_plate(p1)
+            plate3 = db.get_plate(p3)
+            self.assertEqual(plate1["plate_text"], "RESUME 100")
+            self.assertEqual(plate3["plate_text"], "RESUME 100")
+        finally:
+            db.delete_plate(p1)
+            db.delete_plate(p2)
+            db.delete_plate(p3)
+
 
 if __name__ == "__main__":
     unittest.main()
+

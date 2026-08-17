@@ -21,3 +21,6 @@ Thumbs.db
 
 # Local config overrides
 config.local.yaml
+.env
+.env.local
+

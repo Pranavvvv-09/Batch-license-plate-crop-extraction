@@ -12,6 +12,7 @@ import csv
 import io
 import json
 import os
+import random
 import re
 import threading
 import time
@@ -29,44 +30,126 @@ from .logging_setup import get
 
 log = get("labeler")
 
+
+class RateLimiter:
+    """Thread-safe rate limiter with dynamic pacing, cancellable sleep, and 429/503 adaptive backoff for a single API key."""
+
+    def __init__(self, rps: float = 1.5, min_delay_s: float = 0.0):
+        self.rps = max(0.05, float(rps))
+        self.min_delay_s = max(0.0, float(min_delay_s))
+        self._lock = threading.Lock()
+        self._last_call_time = 0.0
+        self._backoff_until = 0.0
+        self._rate_limit_hits = 0
+
+    def wait(self, cancel_event: threading.Event | None = None) -> bool:
+        """Wait until next allowed request time. Returns False if cancelled."""
+        with self._lock:
+            now = time.monotonic()
+            # If we are in a backoff cooldown window
+            if now < self._backoff_until:
+                sleep_time = self._backoff_until - now
+                log.info("Rate limiter holding for %.2fs due to server queue/backoff window...", sleep_time)
+                while sleep_time > 0:
+                    if cancel_event and cancel_event.is_set():
+                        return False
+                    step = min(0.05, sleep_time)
+                    time.sleep(step)
+                    sleep_time -= step
+                now = time.monotonic()
+
+            interval = max(self.min_delay_s, (1.0 / self.rps) if self.rps > 0 else 0.0)
+            elapsed = now - self._last_call_time
+            if elapsed < interval:
+                sleep_time = interval - elapsed
+                while sleep_time > 0:
+                    if cancel_event and cancel_event.is_set():
+                        return False
+                    step = min(0.05, sleep_time)
+                    time.sleep(step)
+                    sleep_time -= step
+            self._last_call_time = time.monotonic()
+            return True
+
+    def report_rate_limit(self, penalty_seconds: float) -> None:
+        with self._lock:
+            self._rate_limit_hits += 1
+            now = time.monotonic()
+            self._backoff_until = max(self._backoff_until, now + penalty_seconds)
+            log.warning(
+                "Rate limiter penalty activated: pausing for %.1fs (rate-limit/busy hits: %d)",
+                penalty_seconds,
+                self._rate_limit_hits,
+            )
+
+    @property
+    def rate_limit_hits(self) -> int:
+        with self._lock:
+            return self._rate_limit_hits
+
+
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 _MARKDOWN_RE = re.compile(r"```(?:[a-zA-Z]*\n)?(.*?)```", re.DOTALL)
 
 
-def clean_plate_text(raw_text: str) -> str:
-    """Clean model response, stripping thinking tokens, markdown, and noise."""
+def clean_plate_text(raw_text: str | None) -> str:
+    """Clean model output to extract only uppercase license plate characters."""
     if not raw_text:
         return ""
 
-    text = raw_text.strip()
-    # Remove <think>...</think> reasoning blocks
-    text = _THINK_RE.sub("", text).strip()
+    # Strip thinking blocks from reasoning models
+    text = _THINK_RE.sub("", raw_text).strip()
 
-    # Extract code blocks if model wrapped output in markdown backticks
-    code_match = _MARKDOWN_RE.search(text)
-    if code_match:
-        text = code_match.group(1).strip()
+    # Extract content from markdown code blocks if present
+    md_match = _MARKDOWN_RE.search(text)
+    if md_match:
+        text = md_match.group(1).strip()
 
-    # Take the first non-empty line
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    # Strip outer quotes / brackets / markdown
+    text = text.strip(" \t\r\n\"'`*()[]{}")
+
+    # Remove JSON wrapper if output was JSON formatted
+    if text.startswith("{") and text.endswith("}"):
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, dict):
+                text = str(parsed.get("plate", parsed.get("license_plate", parsed.get("text", text))))
+        except Exception:
+            pass
+
+    # Strip conversational prefixes
+    text = text.strip(" \t\r\n\"'`*()[]{}")
+    text = re.sub(r"^(license\s*plate|plate\s*number|plate|the\s*plate\s*is|number|text|extracted\s*plate)\s*:\s*", "", text, flags=re.IGNORECASE)
+    text = text.strip(" \t\r\n\"'`*()[]{}:")
+
+    # Clean multi-line responses
+    lines = [line.strip(" \t\r\n\"'`*()[]{}:") for line in text.splitlines() if line.strip(" \t\r\n\"'`*()[]{}:")]
     if lines:
-        text = lines[0]
+        for line in lines:
+            line_clean = re.sub(r"^(license\s*plate|plate\s*number|plate|the\s*plate\s*is|number|text)\s*:\s*", "", line, flags=re.IGNORECASE).strip(" \t\r\n\"'`*()[]{}:")
+            if re.search(r"[A-Z0-9]", line_clean.upper()):
+                text = line_clean
+                break
+        else:
+            text = lines[0]
 
-    # Clean leading/trailing quotes, colons, brackets
-    text = text.strip("\"'`()[]{}")
+    # Convert to uppercase
+    text = text.upper().strip()
 
-    # Common prefixes model might generate
-    for prefix in ("plate:", "license plate:", "plate number:", "text:", "number:", "extracted plate:"):
-        if text.lower().startswith(prefix):
-            text = text[len(prefix):].strip()
-
-    # Normalize whitespace and convert to uppercase
-    text = re.sub(r"\s+", " ", text).strip().upper()
-
-    if text in ("UNREADABLE", "NOT_FOUND", "NONE", "UNKNOWN", "N/A", "NO PLATE"):
+    # Handle unreadable flags
+    if any(un in text for un in ("UNREADABLE", "NOT READABLE", "CANNOT READ", "BLURRY", "UNKNOWN", "NONE", "N/A", "NO PLATE")):
         return "UNREADABLE"
 
-    return text
+    # Retain only standard alphanumeric chars, hyphens, and single spaces
+    text = re.sub(r"[^A-Z0-9\s-]", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+
+    # If it has at least 2 alphanumeric chars, it is a plausible plate
+    alnums = re.findall(r"[A-Z0-9]", text)
+    if len(alnums) >= 2:
+        return text
+
+    return "UNREADABLE" if text else ""
 
 
 @dataclass
@@ -79,18 +162,14 @@ class ScanResult:
 
 
 def _optimize_image_for_nim(image_bytes: bytes) -> tuple[bytes | None, str]:
-    """Ensure plate crop is compact and optimized (< 50KB) to minimize NIM inference time and token limits."""
-    if not image_bytes or len(image_bytes) < 64:
-        return None, ""
-
+    """Ensure image is properly sized (<= 480px max dim) and encoded in JPEG format for NIM."""
     try:
         import cv2
         import numpy as np
 
-        arr = np.frombuffer(image_bytes, dtype=np.uint8)
-        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-        if img is None or img.size == 0:
-            # Try PIL fallback
+        nparr = np.frombuffer(image_bytes, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if img is None:
             from PIL import Image
             import io
 
@@ -121,8 +200,9 @@ def _optimize_image_for_nim(image_bytes: bytes) -> tuple[bytes | None, str]:
 class NimLabeler:
     """Client for NVIDIA NIM Vision/OCR API."""
 
-    def __init__(self, cfg: Config | None = None):
+    def __init__(self, cfg: Config | None = None, rate_limiter: RateLimiter | None = None):
         self.cfg = cfg or load_config()
+        self.rate_limiter = rate_limiter
 
     def get_api_key(self) -> str:
         key = str(self.cfg.get("labeler.api_key", "")).strip().strip('"\'')
@@ -224,6 +304,9 @@ class NimLabeler:
 
         req_data = json.dumps(payload).encode("utf-8")
         timeout_s = float(self.cfg.get("labeler.timeout", 60.0))
+        max_retries = max_retries if max_retries is not None else int(self.cfg.get("labeler.max_retries", 5))
+        base_delay = float(self.cfg.get("labeler.retry_base_delay_s", 2.0))
+        max_delay = float(self.cfg.get("labeler.retry_max_delay_s", 45.0))
 
         last_error = ""
         total_latency = 0.0
@@ -276,16 +359,22 @@ class NimLabeler:
                         error="Authentication/Authorization failed (HTTP 403/401): invalid or unauthorized NVIDIA NIM API key.",
                         latency_s=total_latency,
                     )
-                elif exc.code == 503 and allow_fallback and self.get_fallback_model() and self.get_fallback_model() != target_model:
-                    log.info("Primary model '%s' queue is exhausted (503); immediately switching to fallback model '%s'...", target_model, self.get_fallback_model())
-                    last_error = f"Primary model busy ({exc.code}); switched to fallback."
-                    break
-                elif exc.code in (503, 429, 502, 504) and attempt < max_retries:
-                    # ResourceExhausted or RateLimit -> exponential backoff with jitter
-                    backoff = min(8.0, (1.5 ** attempt) + (attempt * 0.5))
-                    log.info("NIM busy (%d); backing off for %.1fs before retry...", exc.code, backoff)
+
+                if exc.code in (429, 503, 502, 504):
+                    # Server queue exhausted or rate limited -> progressive exponential backoff with jitter
+                    jitter = random.uniform(0.5, 1.5)
+                    backoff = min(max_delay, base_delay * (2 ** (attempt - 1)) + jitter)
+                    log.warning(
+                        "NVIDIA NIM server busy/queue exhausted (HTTP %d, attempt %d/%d). Pausing for %.2fs to allow server queue to drain...",
+                        exc.code, attempt, max_retries, backoff,
+                    )
                     time.sleep(backoff)
-                    last_error = f"NVIDIA NIM busy ({exc.code} ResourceExhausted). Server queue reached limit."
+                    last_error = f"NVIDIA NIM server queue exhausted (HTTP {exc.code}: {err_body[:100]})."
+
+                    # If primary model is consistently busy after 2 attempts and fallback model is configured, switch over
+                    if attempt >= 2 and allow_fallback and self.get_fallback_model() and self.get_fallback_model() != target_model:
+                        log.info("Primary model '%s' queue remains busy; switching to fallback '%s'...", target_model, self.get_fallback_model())
+                        break
                     continue
                 else:
                     msg = f"NVIDIA NIM API error ({exc.code}): {err_body[:200]}"
@@ -297,10 +386,11 @@ class NimLabeler:
                 total_latency += latency
                 log.warning("NVIDIA NIM connection error (attempt %d/%d): %s", attempt, max_retries, exc)
                 if attempt < max_retries:
-                    backoff = min(15.0, (2.0 ** attempt) + 1.0)
-                    log.info("NIM connection timeout/error; retrying in %.1fs...", backoff)
+                    jitter = random.uniform(0.5, 1.5)
+                    backoff = min(max_delay, base_delay * (2 ** (attempt - 1)) + jitter)
+                    log.info("NIM network error; retrying in %.2fs...", backoff)
                     time.sleep(backoff)
-                    last_error = f"NVIDIA NIM connection timed out after {timeout_s}s."
+                    last_error = f"NVIDIA NIM network timeout/error: {exc}"
                     continue
                 else:
                     last_error = f"NVIDIA NIM request timed out or network error ({exc})"
@@ -312,17 +402,18 @@ class NimLabeler:
                 log.exception("NVIDIA NIM unexpected exception: %s", exc)
                 return ScanResult(ok=False, error=f"Scan error: {exc}", latency_s=total_latency)
 
-        # If primary model is exhausted (503) or timed out, try fallback model automatically
+        # If primary model is exhausted (503) or timed out, try fallback model with full retry support
         fallback = self.get_fallback_model()
         if allow_fallback and fallback and fallback != target_model:
-            log.info("Primary model '%s' queue is exhausted; automatically trying fallback '%s'...", target_model, fallback)
+            log.info("Switching to fallback model '%s' with automatic queue backoff...", fallback)
+            time.sleep(random.uniform(0.5, 1.0))
             fallback_res = self.scan_image_bytes(
                 image_bytes=image_bytes,
                 mime_type=mime_type,
                 api_key=api_key,
                 model=fallback,
                 prompt=prompt,
-                max_retries=2,
+                max_retries=max_retries,
                 allow_fallback=False,
             )
             if fallback_res.ok:
@@ -389,34 +480,49 @@ class NimLabeler:
 
 
 class BatchLabeler:
-    """Background worker for batch scanning plate images."""
+    """Background worker for rate-limited batch scanning up to 10,000+ plate images."""
 
     def __init__(self):
         self._thread: threading.Thread | None = None
         self._cancel_flag = threading.Event()
         self._lock = threading.Lock()
+        self._limiter: RateLimiter | None = None
         self._status: dict[str, Any] = {
             "running": False,
             "total": 0,
             "processed": 0,
             "succeeded": 0,
             "failed": 0,
+            "pending": 0,
+            "rate_limit_hits": 0,
             "current_filename": "",
             "last_error": "",
             "started_at": 0.0,
             "elapsed_s": 0.0,
+            "eta_s": 0.0,
         }
 
     def status(self) -> dict[str, Any]:
         with self._lock:
             st = dict(self._status)
             if st["running"] and st["started_at"] > 0:
-                st["elapsed_s"] = round(time.time() - st["started_at"], 1)
-            # Add overall DB labeling stats
+                elapsed = round(time.time() - st["started_at"], 1)
+                st["elapsed_s"] = elapsed
+                if st["processed"] > 0 and st["total"] > st["processed"]:
+                    rate = st["processed"] / max(1.0, elapsed)
+                    st["eta_s"] = round((st["total"] - st["processed"]) / max(0.01, rate), 1)
+                else:
+                    st["eta_s"] = 0.0
             st["stats"] = db.get_label_stats()
             return st
 
-    def start_batch(self, limit: int = 500, force_all: bool = False, api_key: str | None = None) -> bool:
+    def start_batch(
+        self,
+        limit: int = 10000,
+        force_all: bool = False,
+        retry_errors: bool = True,
+        api_key: str | None = None,
+    ) -> bool:
         with self._lock:
             if self._thread and self._thread.is_alive():
                 return False  # already running
@@ -428,15 +534,18 @@ class BatchLabeler:
                 "processed": 0,
                 "succeeded": 0,
                 "failed": 0,
+                "pending": 0,
+                "rate_limit_hits": 0,
                 "current_filename": "",
                 "last_error": "",
                 "started_at": time.time(),
                 "elapsed_s": 0.0,
+                "eta_s": 0.0,
             }
 
             self._thread = threading.Thread(
                 target=self._run_batch,
-                args=(limit, force_all, api_key),
+                args=(limit, force_all, retry_errors, api_key),
                 name="nim-batch-labeler",
                 daemon=True,
             )
@@ -446,50 +555,95 @@ class BatchLabeler:
     def cancel(self) -> None:
         self._cancel_flag.set()
 
-    def _run_batch(self, limit: int, force_all: bool, api_key: str | None) -> None:
+    def _run_batch(
+        self,
+        limit: int,
+        force_all: bool,
+        retry_errors: bool,
+        api_key: str | None,
+    ) -> None:
         cfg = load_config()
-        client = NimLabeler(cfg)
-        log.info("Starting NVIDIA NIM batch OCR labeling run...")
+        rps = float(cfg.get("labeler.rate_limit_rps", 1.5))
+        min_delay_s = float(cfg.get("labeler.min_delay_s", 0.0))
+        chunk_size = int(cfg.get("labeler.batch_chunk_size", 50))
+        limiter = RateLimiter(rps=rps, min_delay_s=min_delay_s)
+        self._limiter = limiter
+        client = NimLabeler(cfg, rate_limiter=limiter)
 
+        stats = db.get_label_stats()
         if force_all:
-            plates, _ = db.list_plates(limit=limit, offset=0)
+            target_total = min(limit, stats["total_plates"])
         else:
-            plates = db.get_unlabeled_plates(limit=limit)
+            pending_count = stats["unlabeled"] + (stats["error"] if retry_errors else 0)
+            target_total = min(limit, pending_count)
 
         with self._lock:
-            self._status["total"] = len(plates)
+            self._status["total"] = target_total
+            self._status["pending"] = target_total
 
-        if not plates:
+        log.info(
+            "Starting NVIDIA NIM queue-based batch OCR (Target: %d plates, rate limit: %.2f rps, chunk size: %d)...",
+            target_total, rps, chunk_size,
+        )
+
+        if target_total <= 0:
             with self._lock:
                 self._status["running"] = False
-            log.info("No plates to label.")
+            log.info("No pending plates to label.")
             return
 
-        for p in plates:
+        offset = 0
+        processed_count = 0
+
+        while processed_count < limit:
             if self._cancel_flag.is_set():
                 log.info("NIM batch labeling cancelled by user.")
                 break
 
-            plate_id = p["id"]
-            filename = p["filename"]
-            with self._lock:
-                self._status["current_filename"] = filename
-
-            res = client.scan_plate_record(plate_id, api_key=api_key)
-
-            with self._lock:
-                self._status["processed"] += 1
-                if res.ok:
-                    self._status["succeeded"] += 1
-                else:
-                    self._status["failed"] += 1
-                    self._status["last_error"] = res.error
-
-            # Dynamic pacing: fast if OK, pause if server under pressure
-            if res.ok:
-                time.sleep(0.4)
+            fetch_limit = min(chunk_size, limit - processed_count)
+            if force_all:
+                chunk, _ = db.list_plates(limit=fetch_limit, offset=offset)
+                offset += len(chunk)
             else:
-                time.sleep(2.5)
+                chunk = db.get_unlabeled_plates(limit=fetch_limit, include_errors=retry_errors)
+
+            if not chunk:
+                log.info("Queue empty: all plates processed.")
+                break
+
+            for p in chunk:
+                if self._cancel_flag.is_set():
+                    log.info("NIM batch labeling cancelled mid-chunk.")
+                    break
+
+                plate_id = p["id"]
+                filename = p["filename"]
+
+                with self._lock:
+                    self._status["current_filename"] = filename
+
+                # Rate limiting spacing with instant cancellation check
+                if not limiter.wait(self._cancel_flag):
+                    log.info("NIM batch labeling cancelled during rate limit pause.")
+                    break
+
+                # Process single image (with exponential backoff & memory cleanup)
+                res = client.scan_plate_record(plate_id, api_key=api_key)
+
+                processed_count += 1
+                with self._lock:
+                    self._status["processed"] = processed_count
+                    self._status["pending"] = max(0, target_total - processed_count)
+                    self._status["rate_limit_hits"] = limiter.rate_limit_hits
+                    if res.ok:
+                        self._status["succeeded"] += 1
+                    else:
+                        self._status["failed"] += 1
+                        self._status["last_error"] = res.error
+
+                # Periodically sync labels to CSV
+                if processed_count % 25 == 0:
+                    sync_labels_csv(cfg)
 
         # Final CSV sync
         sync_labels_csv(cfg)
@@ -498,12 +652,14 @@ class BatchLabeler:
             self._status["running"] = False
             self._status["current_filename"] = ""
             log.info(
-                "NIM batch OCR completed: %d/%d processed (%d succeeded, %d failed)",
+                "NIM batch OCR completed: %d/%d processed (%d succeeded, %d failed, %d rate-limit hits)",
                 self._status["processed"],
                 self._status["total"],
                 self._status["succeeded"],
                 self._status["failed"],
+                self._status["rate_limit_hits"],
             )
+
 
 
 # Global singleton

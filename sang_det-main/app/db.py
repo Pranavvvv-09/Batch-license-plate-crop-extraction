@@ -229,42 +229,59 @@ class DBConnectionWrapper:
         self.use_pg = is_postgres()
 
     def execute(self, sql: str, params: tuple | list = ()):
-        sql = _translate_sql(sql)
-        params = tuple(params) if params is not None else ()
+        sql_translated = _translate_sql(sql)
+        params_tuple = tuple(params) if params is not None else ()
         if self.use_pg:
             conn = connect_postgres()
-            cur = conn.cursor()
-            cur.execute(sql, params)
-            return cur
+            with conn.cursor() as cur:
+                cur.execute(sql_translated, params_tuple)
+                return cur
         else:
             conn = connect_sqlite()
-            return conn.execute(sql, params)
+            return conn.execute(sql, params_tuple)
 
     def fetchone(self, sql: str, params: tuple | list = ()) -> dict[str, Any] | None:
-        cur = self.execute(sql, params)
-        row = cur.fetchone()
-        if row is None:
-            return None
-        return dict(row)
+        params_tuple = tuple(params) if params is not None else ()
+        if self.use_pg:
+            conn = connect_postgres()
+            with conn.cursor() as cur:
+                cur.execute(_translate_sql(sql), params_tuple)
+                row = cur.fetchone()
+                return dict(row) if row is not None else None
+        else:
+            conn = connect_sqlite()
+            cur = conn.execute(sql, params_tuple)
+            row = cur.fetchone()
+            return dict(row) if row is not None else None
 
     def fetchall(self, sql: str, params: tuple | list = ()) -> list[dict[str, Any]]:
-        cur = self.execute(sql, params)
-        rows = cur.fetchall()
-        return [dict(r) for r in rows]
+        params_tuple = tuple(params) if params is not None else ()
+        if self.use_pg:
+            conn = connect_postgres()
+            with conn.cursor() as cur:
+                cur.execute(_translate_sql(sql), params_tuple)
+                rows = cur.fetchall()
+                return [dict(r) for r in rows]
+        else:
+            conn = connect_sqlite()
+            cur = conn.execute(sql, params_tuple)
+            rows = cur.fetchall()
+            return [dict(r) for r in rows]
 
     def insert_get_id(self, sql: str, params: tuple | list = (), returning: str = "id") -> int:
+        params_tuple = tuple(params) if params is not None else ()
         if self.use_pg:
             pg_sql = _translate_sql(sql)
             if "RETURNING" not in pg_sql.upper():
                 pg_sql = f"{pg_sql.rstrip(';')} RETURNING {returning}"
             conn = connect_postgres()
-            cur = conn.cursor()
-            cur.execute(pg_sql, tuple(params))
-            row = cur.fetchone()
-            return row[returning] if row else 0
+            with conn.cursor() as cur:
+                cur.execute(pg_sql, params_tuple)
+                row = cur.fetchone()
+                return row[returning] if row else 0
         else:
             conn = connect_sqlite()
-            cur = conn.execute(sql, tuple(params))
+            cur = conn.execute(sql, params_tuple)
             return cur.lastrowid or 0
 
 
@@ -623,15 +640,24 @@ def list_plates(
     return rows, total
 
 
-def get_unlabeled_plates(limit: int = 100) -> list[dict[str, Any]]:
+def get_unlabeled_plates(limit: int = 100, include_errors: bool = True) -> list[dict[str, Any]]:
     db = db_wrapper()
-    return db.fetchall(
-        "SELECT p.*, v.url AS source_url FROM plates p "
-        "LEFT JOIN videos v ON v.id = p.video_id "
-        "WHERE p.ocr_status = 'unlabeled' OR p.plate_text IS NULL OR p.plate_text = '' "
-        "ORDER BY p.id ASC LIMIT ?",
-        (limit,),
-    )
+    if include_errors:
+        sql = (
+            "SELECT p.*, v.url AS source_url FROM plates p "
+            "LEFT JOIN videos v ON v.id = p.video_id "
+            "WHERE p.ocr_status = 'unlabeled' OR p.ocr_status = 'error' OR p.plate_text IS NULL OR p.plate_text = '' "
+            "ORDER BY CASE p.ocr_status WHEN 'unlabeled' THEN 0 ELSE 1 END, p.id ASC LIMIT ?"
+        )
+    else:
+        sql = (
+            "SELECT p.*, v.url AS source_url FROM plates p "
+            "LEFT JOIN videos v ON v.id = p.video_id "
+            "WHERE p.ocr_status = 'unlabeled' AND (p.plate_text IS NULL OR p.plate_text = '') "
+            "ORDER BY p.id ASC LIMIT ?"
+        )
+    return db.fetchall(sql, (limit,))
+
 
 
 def get_all_plates_for_export() -> list[dict[str, Any]]:

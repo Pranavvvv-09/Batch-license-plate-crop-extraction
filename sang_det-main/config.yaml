@@ -172,6 +172,19 @@ labeler:
   max_tokens: 128
   # Default CSV path for labels export/sync.
   csv_path: "data/labels.csv"
+  # Rate limiting (requests per second allowed for single NIM key)
+  rate_limit_rps: 1.5
+  # Minimum seconds to pause between consecutive requests
+  min_delay_s: 0.0
+  # Automatic retry attempts for 429/503/network errors
+  max_retries: 5
+  # Base exponential backoff delay in seconds
+  retry_base_delay_s: 2.0
+  # Maximum backoff delay cap in seconds
+  retry_max_delay_s: 45.0
+  # Memory guard: number of plate metadata records fetched into RAM per chunk
+  batch_chunk_size: 50
+
 
 
 

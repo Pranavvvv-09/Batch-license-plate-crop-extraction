@@ -360,9 +360,11 @@ class LabelScanPayload(BaseModel):
 
 
 class BatchScanPayload(BaseModel):
-    limit: int = Field(default=500, description="Max plates to process in this run")
+    limit: int = Field(default=10000, description="Max plates to process in this run")
     force_all: bool = Field(default=False, description="Re-scan already labeled plates if True")
+    retry_errors: bool = Field(default=True, description="Retry previously errored plates if True")
     api_key: str | None = None
+
 
 
 class PlateUpdatePayload(BaseModel):
@@ -446,15 +448,17 @@ async def labeler_scan_single_plate(
 
 @app.post("/api/labeler/scan-all")
 async def labeler_scan_all(payload: BatchScanPayload | None = None) -> dict:
-    limit = payload.limit if payload else 500
+    limit = payload.limit if payload else 10000
     force_all = payload.force_all if payload else False
+    retry_errors = payload.retry_errors if payload else True
     api_key = payload.api_key if payload else None
 
     batch = labeler.get_batch_labeler()
-    started = batch.start_batch(limit=limit, force_all=force_all, api_key=api_key)
+    started = batch.start_batch(limit=limit, force_all=force_all, retry_errors=retry_errors, api_key=api_key)
     if not started:
         raise HTTPException(400, "A batch labeling job is already in progress.")
     return {"ok": True, "message": "Batch labeling started.", "status": batch.status()}
+
 
 
 @app.post("/api/labeler/cancel")
