@@ -197,24 +197,115 @@ def _optimize_image_for_nim(image_bytes: bytes) -> tuple[bytes | None, str]:
     return None, ""
 
 
-class NimLabeler:
-    """Client for NVIDIA NIM Vision/OCR API."""
+class KeyPool:
+    """Thread-safe Multi-Key Pool with Round-Robin Rotation and Automatic Failover."""
 
-    def __init__(self, cfg: Config | None = None, rate_limiter: RateLimiter | None = None):
+    def __init__(self, raw_keys: list[str] | str | None = None):
+        self._lock = threading.Lock()
+        self._keys: list[str] = []
+        self._exhausted_keys: set[str] = set()
+        self._index: int = 0
+        if raw_keys:
+            self.load_keys(raw_keys)
+
+    def load_keys(self, raw: list[str] | str | None = None) -> None:
+        with self._lock:
+            self._keys.clear()
+            self._exhausted_keys.clear()
+            self._index = 0
+            candidate_tokens: list[str] = []
+
+            if raw:
+                if isinstance(raw, list):
+                    for item in raw:
+                        candidate_tokens.extend(str(item).replace(";", ",").replace("\n", ",").split(","))
+                else:
+                    candidate_tokens.extend(str(raw).replace(";", ",").replace("\n", ",").split(","))
+            else:
+                # Auto-discover from env if no explicit keys provided
+                env_keys = ["NVIDIA_API_KEY", "NVIDIA_NIM_API_KEY"] + [f"NVIDIA_API_KEY_{i}" for i in range(1, 10)]
+                for env_name in env_keys:
+                    val = os.environ.get(env_name, "").strip()
+                    if val:
+                        candidate_tokens.extend(val.replace(";", ",").replace("\n", ",").split(","))
+
+            seen = set()
+            for token in candidate_tokens:
+                clean = token.strip().strip('"\'')
+                if "nvapi-" in clean:
+                    parts = [("nvapi-" + p.strip()) for p in clean.split("nvapi-") if p.strip()]
+                    for p in parts:
+                        if p not in seen and len(p) >= 20:
+                            seen.add(p)
+                            self._keys.append(p)
+                elif clean and clean not in seen and len(clean) >= 20:
+                    seen.add(clean)
+                    self._keys.append(clean)
+
+            if self._keys:
+                log.info("Initialized Multi-Key Pool with %d active NVIDIA NIM API key(s)", len(self._keys))
+
+    @property
+    def total_count(self) -> int:
+        with self._lock:
+            return len(self._keys)
+
+    @property
+    def active_count(self) -> int:
+        with self._lock:
+            return max(0, len(self._keys) - len(self._exhausted_keys))
+
+    @property
+    def all_keys(self) -> list[str]:
+        with self._lock:
+            return list(self._keys)
+
+    def get_next_key(self) -> str:
+        """Return the next healthy key in round-robin order."""
+        with self._lock:
+            if not self._keys:
+                return ""
+            healthy = [k for k in self._keys if k not in self._exhausted_keys]
+            if not healthy:
+                # If all were marked exhausted, reset to give them another try
+                self._exhausted_keys.clear()
+                healthy = list(self._keys)
+
+            key = healthy[self._index % len(healthy)]
+            self._index += 1
+            return key
+
+    def mark_exhausted(self, key: str) -> None:
+        with self._lock:
+            if key in self._keys:
+                self._exhausted_keys.add(key)
+                log.warning(
+                    "API key %s... marked exhausted/unauthorized. Remaining active keys in pool: %d/%d",
+                    key[:12],
+                    self.active_count,
+                    len(self._keys),
+                )
+
+
+class NimLabeler:
+    """Client for NVIDIA NIM Vision/OCR API with Multi-Key Pool support."""
+
+    def __init__(
+        self,
+        cfg: Config | None = None,
+        rate_limiter: RateLimiter | None = None,
+        key_pool: KeyPool | None = None,
+    ):
         self.cfg = cfg or load_config()
         self.rate_limiter = rate_limiter
+        if key_pool:
+            self.key_pool = key_pool
+        else:
+            raw_key = self.cfg.get("labeler.api_key") or os.environ.get("NVIDIA_API_KEY", "")
+            self.key_pool = KeyPool(raw_key)
 
     def get_api_key(self) -> str:
-        key = str(self.cfg.get("labeler.api_key", "")).strip().strip('"\'')
-        if not key:
-            key = os.environ.get("NVIDIA_API_KEY", "").strip() or os.environ.get("NVIDIA_NIM_API_KEY", "").strip()
-
-        # Auto-sanitize if multiple nvapi keys were accidentally pasted together
-        if "nvapi-" in key:
-            parts = [("nvapi-" + p.strip()) for p in key.split("nvapi-") if p.strip()]
-            if parts:
-                key = parts[-1].strip()  # use the latest valid key token
-        return key
+        return self.key_pool.get_next_key()
 
     def get_base_url(self) -> str:
         url = str(self.cfg.get("labeler.base_url", "https://integrate.api.nvidia.com/v1")).strip()
@@ -310,8 +401,15 @@ class NimLabeler:
 
         last_error = ""
         total_latency = 0.0
+        current_key = (api_key or self.get_api_key()).strip()
 
         for attempt in range(1, max_retries + 1):
+            if not current_key:
+                current_key = self.get_api_key().strip()
+            if not current_key:
+                return ScanResult(ok=False, error="NVIDIA NIM API key is missing. Set NVIDIA_API_KEY in .env.")
+
+            headers["Authorization"] = f"Bearer {current_key}"
             req = urllib.request.Request(endpoint, data=req_data, headers=headers, method="POST")
             t0 = time.time()
             try:
@@ -354,22 +452,32 @@ class NimLabeler:
                 log.warning("NVIDIA NIM HTTP %d (attempt %d/%d): %s", exc.code, attempt, max_retries, err_body[:180])
 
                 if exc.code in (401, 403):
+                    self.key_pool.mark_exhausted(current_key)
+                    if self.key_pool.active_count > 0:
+                        log.info("API key failed authorization; rotating to next active key in pool...")
+                        current_key = self.get_api_key().strip()
+                        continue
                     return ScanResult(
                         ok=False,
-                        error="Authentication/Authorization failed (HTTP 403/401): invalid or unauthorized NVIDIA NIM API key.",
+                        error="Authentication failed: all NVIDIA NIM API keys in the pool are invalid or expired.",
                         latency_s=total_latency,
                     )
 
                 if exc.code in (429, 503, 502, 504):
-                    # Server queue exhausted or rate limited -> progressive exponential backoff with jitter
+                    if self.rate_limiter:
+                        self.rate_limiter.report_rate_limit()
+                    # Progressive exponential backoff with jitter
                     jitter = random.uniform(0.5, 1.5)
                     backoff = min(max_delay, base_delay * (2 ** (attempt - 1)) + jitter)
                     log.warning(
-                        "NVIDIA NIM server busy/queue exhausted (HTTP %d, attempt %d/%d). Pausing for %.2fs to allow server queue to drain...",
+                        "NVIDIA NIM server busy/queue exhausted (HTTP %d, attempt %d/%d). Pausing for %.2fs...",
                         exc.code, attempt, max_retries, backoff,
                     )
                     time.sleep(backoff)
                     last_error = f"NVIDIA NIM server queue exhausted (HTTP {exc.code}: {err_body[:100]})."
+
+                    # Rotate to next key in pool for next attempt
+                    current_key = self.get_api_key().strip()
 
                     # If primary model is consistently busy after 2 attempts and fallback model is configured, switch over
                     if attempt >= 2 and allow_fallback and self.get_fallback_model() and self.get_fallback_model() != target_model:
@@ -563,12 +671,19 @@ class BatchLabeler:
         api_key: str | None,
     ) -> None:
         cfg = load_config()
-        rps = float(cfg.get("labeler.rate_limit_rps", 1.5))
+        client = NimLabeler(cfg, rate_limiter=None)
+        if api_key:
+            client.key_pool.load_keys(api_key)
+
+        base_rps = float(cfg.get("labeler.rate_limit_rps", 1.5))
         min_delay_s = float(cfg.get("labeler.min_delay_s", 0.0))
         chunk_size = int(cfg.get("labeler.batch_chunk_size", 50))
-        limiter = RateLimiter(rps=rps, min_delay_s=min_delay_s)
+
+        active_keys = max(1, client.key_pool.active_count)
+        aggregate_rps = round(base_rps * active_keys, 2)
+        limiter = RateLimiter(rps=aggregate_rps, min_delay_s=min_delay_s)
         self._limiter = limiter
-        client = NimLabeler(cfg, rate_limiter=limiter)
+        client.rate_limiter = limiter
 
         stats = db.get_label_stats()
         if force_all:
@@ -580,10 +695,12 @@ class BatchLabeler:
         with self._lock:
             self._status["total"] = target_total
             self._status["pending"] = target_total
+            self._status["active_keys"] = active_keys
+            self._status["total_keys"] = client.key_pool.total_count
 
         log.info(
-            "Starting NVIDIA NIM queue-based batch OCR (Target: %d plates, rate limit: %.2f rps, chunk size: %d)...",
-            target_total, rps, chunk_size,
+            "Starting NVIDIA NIM queue-based batch OCR with Multi-Key Pool (Keys: %d, Aggregate Rate: %.2f rps, chunk size: %d)...",
+            active_keys, aggregate_rps, chunk_size,
         )
 
         if target_total <= 0:

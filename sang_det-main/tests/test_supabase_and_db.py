@@ -10,6 +10,18 @@ from app.config import Config
 
 class TestDatabaseAndStorage(unittest.TestCase):
 
+    @classmethod
+    def setUpClass(cls):
+        cls._orig_db_url = os.environ.pop("DATABASE_URL", None)
+        cls._orig_db_engine = getattr(db, "_db_engine", None)
+        db._db_engine = "sqlite"
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls._orig_db_url:
+            os.environ["DATABASE_URL"] = cls._orig_db_url
+        db._db_engine = cls._orig_db_engine
+
     def setUp(self):
         # Ensure fresh local test database
         if hasattr(db._local, "sqlite_conn") and db._local.sqlite_conn:
@@ -23,8 +35,10 @@ class TestDatabaseAndStorage(unittest.TestCase):
                 test_db_path.unlink()
             except OSError:
                 pass
+        import threading
         db.DB_PATH = test_db_path
-        db._local = type("Local", (), {})()
+        db._local = threading.local()
+        db._db_engine = "sqlite"
         db.init()
         db.clear_all_plates()
         db.db_wrapper().execute("DELETE FROM videos")

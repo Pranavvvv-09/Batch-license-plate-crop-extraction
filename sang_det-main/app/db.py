@@ -161,6 +161,8 @@ CREATE TABLE IF NOT EXISTS state (
 
 def is_postgres() -> bool:
     """Check if PostgreSQL / Supabase connection is configured."""
+    if globals().get("_db_engine") == "sqlite":
+        return False
     cfg = load_config()
     db_url = (
         str(cfg.get("supabase.db_url") or "").strip()

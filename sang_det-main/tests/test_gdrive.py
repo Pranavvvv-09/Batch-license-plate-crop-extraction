@@ -16,6 +16,32 @@ from app.config import load as load_config
 
 
 class TestGDriveIntegration(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        import os
+        import threading
+        from app import config, db
+        cls._orig_db_url = os.environ.pop("DATABASE_URL", None)
+        cls._orig_supabase_url = os.environ.pop("SUPABASE_URL", None)
+        cls._orig_db_engine = getattr(db, "_db_engine", None)
+        db._db_engine = "sqlite"
+        config._instance = None
+        db._local = threading.local()
+        db.init()
+
+    @classmethod
+    def tearDownClass(cls):
+        import os
+        import threading
+        from app import config, db
+        if cls._orig_db_url:
+            os.environ["DATABASE_URL"] = cls._orig_db_url
+        if cls._orig_supabase_url:
+            os.environ["SUPABASE_URL"] = cls._orig_supabase_url
+        db._db_engine = cls._orig_db_engine
+        config._instance = None
+        db._local = threading.local()
+
     def test_gdrive_url_detection(self):
         self.assertTrue(is_gdrive_url("https://drive.google.com/file/d/12345/view"))
         self.assertTrue(is_gdrive_url("https://drive.google.com/drive/folders/abcdef"))
