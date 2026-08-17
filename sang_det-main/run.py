@@ -322,6 +322,12 @@ def cmd_label(args: argparse.Namespace) -> int:
     return 0 if failed == 0 else 1
 
 
+def cmd_upload_folder(args: argparse.Namespace) -> int:
+    from upload_10k_images import bulk_upload_folder
+    res = bulk_upload_folder(args.folder, recursive=not args.no_recursive, workers=args.workers)
+    return 0 if res.get("ok") else 1
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="run.py",
@@ -337,9 +343,14 @@ def main() -> int:
     add = sub.add_parser("add", help="queue links from arguments, a file, or stdin")
     add.add_argument("urls", nargs="*", help="URLs, or a path to a file of URLs")
 
+    up = sub.add_parser("upload-folder", help="bulk upload a local folder of images to Supabase in parallel")
+    up.add_argument("folder", help="path to local directory containing images")
+    up.add_argument("--workers", type=int, default=16, help="parallel upload threads (default: 16)")
+    up.add_argument("--no-recursive", action="store_true", help="do not scan subdirectories")
+
     lbl = sub.add_parser("label", help="scan saved plate crops to text using NVIDIA NIM OCR")
     lbl.add_argument("--all", action="store_true", help="re-scan all plates including already labeled ones")
-    lbl.add_argument("--limit", type=int, default=500, help="max plates to scan (default: 500)")
+    lbl.add_argument("--limit", type=int, default=10000, help="max plates to scan (default: 10000)")
     lbl.add_argument("--api-key", help="override NVIDIA NIM API key")
     lbl.add_argument("--csv", help="output CSV destination path (default: data/labels.csv)")
 
@@ -352,6 +363,7 @@ def main() -> int:
         "status": cmd_status,
         "doctor": cmd_doctor,
         "label": cmd_label,
+        "upload-folder": cmd_upload_folder,
     }
     try:
         return handlers[args.command](args)
