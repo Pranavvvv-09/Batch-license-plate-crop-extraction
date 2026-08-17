@@ -104,7 +104,7 @@ DEFAULTS: dict[str, Any] = {
         "model": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
         "fallback_model": "meta/llama-3.2-11b-vision-instruct",
         "prompt": "Extract and output only the license plate alphanumeric text from this image. Output uppercase text with standard spacing. If unreadable, output UNREADABLE. Do not include any explanations or other text.",
-        "timeout": 60.0,
+        "timeout": 90.0,
         "reasoning_budget": 128,
         "temperature": 0.1,
         "max_tokens": 128,

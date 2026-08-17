@@ -163,7 +163,7 @@ labeler:
   # System / user extraction prompt.
   prompt: "Extract and output only the license plate alphanumeric text from this image. Output uppercase text with standard spacing. If unreadable, output UNREADABLE. Do not include any explanations or other text."
   # Request timeout in seconds.
-  timeout: 60.0
+  timeout: 90.0
   # Max thinking/reasoning tokens for Nemotron-3 reasoning models (keeps OCR response fast).
   reasoning_budget: 128
   # Model temperature.
