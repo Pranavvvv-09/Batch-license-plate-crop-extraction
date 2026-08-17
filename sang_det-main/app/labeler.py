@@ -213,34 +213,38 @@ class KeyPool:
             self._keys.clear()
             self._exhausted_keys.clear()
             self._index = 0
-            candidate_tokens: list[str] = []
 
+            raw_str = ""
             if raw:
                 if isinstance(raw, list):
-                    for item in raw:
-                        candidate_tokens.extend(str(item).replace(";", ",").replace("\n", ",").split(","))
+                    raw_str = " ".join(str(r) for r in raw)
                 else:
-                    candidate_tokens.extend(str(raw).replace(";", ",").replace("\n", ",").split(","))
+                    raw_str = str(raw)
             else:
                 # Auto-discover from env if no explicit keys provided
-                env_keys = ["NVIDIA_API_KEY", "NVIDIA_NIM_API_KEY"] + [f"NVIDIA_API_KEY_{i}" for i in range(1, 10)]
-                for env_name in env_keys:
-                    val = os.environ.get(env_name, "").strip()
-                    if val:
-                        candidate_tokens.extend(val.replace(";", ",").replace("\n", ",").split(","))
+                env_vals = [
+                    os.environ.get("NVIDIA_API_KEY", ""),
+                    os.environ.get("NVIDIA_NIM_API_KEY", ""),
+                ] + [os.environ.get(f"NVIDIA_API_KEY_{i}", "") for i in range(1, 10)]
+                raw_str = " ".join(v for v in env_vals if v)
 
+            # Extract all nvapi-... tokens via regex
+            matches = re.findall(r"nvapi-[A-Za-z0-9_\-]+", raw_str)
             seen = set()
-            for token in candidate_tokens:
-                clean = token.strip().strip('"\'')
-                if "nvapi-" in clean:
-                    parts = [("nvapi-" + p.strip()) for p in clean.split("nvapi-") if p.strip()]
-                    for p in parts:
-                        if p not in seen and len(p) >= 20:
-                            seen.add(p)
-                            self._keys.append(p)
-                elif clean and clean not in seen and len(clean) >= 20:
+            for k in matches:
+                clean = k.strip()
+                if clean not in seen and len(clean) >= 20:
                     seen.add(clean)
                     self._keys.append(clean)
+
+            # Fallback for non-standard key format tokens
+            if not self._keys and raw_str.strip():
+                tokens = re.split(r"[,;\s\n]+", raw_str.strip())
+                for t in tokens:
+                    clean = t.strip().strip("\"'")
+                    if clean and clean not in seen and len(clean) >= 20:
+                        seen.add(clean)
+                        self._keys.append(clean)
 
             if self._keys:
                 log.info("Initialized Multi-Key Pool with %d active NVIDIA NIM API key(s)", len(self._keys))
@@ -340,11 +344,21 @@ class NimLabeler:
         allow_fallback: bool = True,
     ) -> ScanResult:
         """Send image bytes to NVIDIA NIM API for OCR plate text extraction with auto-retry and fallback."""
-        key = (api_key or self.get_api_key()).strip()
-        if not key:
+        if api_key and api_key.strip():
+            clean_arg = api_key.strip().strip("\"'")
+            if "," in clean_arg or ";" in clean_arg or len(re.findall(r"nvapi-[A-Za-z0-9_\-]+", clean_arg)) > 1:
+                self.key_pool.load_keys(clean_arg)
+                current_key = self.get_api_key()
+            else:
+                m = re.search(r"nvapi-[A-Za-z0-9_\-]+", clean_arg)
+                current_key = m.group(0) if m else clean_arg
+        else:
+            current_key = self.get_api_key()
+
+        if not current_key:
             return ScanResult(
                 ok=False,
-                error="NVIDIA NIM API key is missing. Configure it in Settings or set NVIDIA_API_KEY.",
+                error="NVIDIA NIM API key is missing. Configure it in Settings or set NVIDIA_API_KEY in .env.",
             )
 
         # Optimize image size before base64 encoding and validate readability
@@ -387,21 +401,20 @@ class NimLabeler:
             payload["reasoning_budget"] = budget
 
         headers = {
-            "Authorization": f"Bearer {key}",
+            "Authorization": f"Bearer {current_key}",
             "Content-Type": "application/json",
             "Accept": "application/json",
             "User-Agent": "sang_det-nim-labeler/1.0",
         }
 
         req_data = json.dumps(payload).encode("utf-8")
-        timeout_s = float(self.cfg.get("labeler.timeout", 60.0))
+        timeout_s = float(self.cfg.get("labeler.timeout", 90.0))
         max_retries = max_retries if max_retries is not None else int(self.cfg.get("labeler.max_retries", 5))
         base_delay = float(self.cfg.get("labeler.retry_base_delay_s", 2.0))
         max_delay = float(self.cfg.get("labeler.retry_max_delay_s", 45.0))
 
         last_error = ""
         total_latency = 0.0
-        current_key = (api_key or self.get_api_key()).strip()
 
         for attempt in range(1, max_retries + 1):
             if not current_key:
@@ -745,7 +758,7 @@ class BatchLabeler:
                     break
 
                 # Process single image (with exponential backoff & memory cleanup)
-                res = client.scan_plate_record(plate_id, api_key=api_key)
+                res = client.scan_plate_record(plate_id)
 
                 processed_count += 1
                 with self._lock:
