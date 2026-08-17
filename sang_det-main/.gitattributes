@@ -1,0 +1,19 @@
+# Normalise to LF in the repository; check out native on each platform.
+# Without this, editing on Windows and running on macOS/Linux churns every
+# line of every file in the diff.
+* text=auto eol=lf
+
+*.py    text eol=lf
+*.yaml  text eol=lf
+*.yml   text eol=lf
+*.md    text eol=lf
+*.html  text eol=lf
+*.txt   text eol=lf
+
+# Binary assets - never touch these.
+*.pt    binary
+*.jpg   binary
+*.jpeg  binary
+*.png   binary
+*.mp4   binary
+*.db    binary

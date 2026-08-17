@@ -1,0 +1,24 @@
+# =========================================================================
+#  Render Deployment Blueprint
+#  Deploy with 1-click on https://render.com
+# =========================================================================
+
+services:
+  - type: web
+    name: sang-det
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: standard
+    envVars:
+      - key: PORT
+        value: 8000
+      - key: DATABASE_URL
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_KEY
+        sync: false
+      - key: SUPABASE_BUCKET
+        value: plates
+      - key: NVIDIA_API_KEY
+        sync: false

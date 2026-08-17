@@ -1,0 +1,15 @@
+# =========================================================================
+#  Railway Deployment Configuration
+#  Deploy with 1-click on https://railway.app
+# =========================================================================
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+startCommand = "python run.py serve"
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
+healthcheckPath = "/api/status"
+healthcheckTimeout = 300

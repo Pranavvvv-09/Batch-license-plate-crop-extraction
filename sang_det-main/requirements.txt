@@ -1,0 +1,33 @@
+# ---- Web / API layer ----------------------------------------------------
+fastapi>=0.110
+uvicorn>=0.27
+python-multipart>=0.0.9
+PyYAML>=6.0
+
+# ---- Video & Drive ingest -----------------------------------------------
+yt-dlp>=2024.8.6
+gdown>=5.0.0
+beautifulsoup4>=4.12.0
+imageio-ffmpeg>=0.4.9        # ships a static ffmpeg binary; no system install needed
+opencv-python-headless>=4.9  # decoder fallback + image ops
+
+# ---- Detection ----------------------------------------------------------
+# NOTE: on an NVIDIA machine install torch FIRST from the CUDA index, e.g.
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+# otherwise pip resolves the CPU-only build. See README "GPU acceleration".
+torch>=2.2
+torchvision>=0.17
+ultralytics>=8.3.0
+huggingface-hub>=0.23
+
+# ---- Image quality / dedup ---------------------------------------------
+numpy>=1.24,<3
+Pillow>=10.2
+ImageHash>=4.3.1
+
+# ---- Cloud Database & Storage (Supabase) ------------------------------
+psycopg2-binary>=2.9.9
+supabase>=2.3.0
+python-dotenv>=1.0.0
+httpx>=0.25.0
+

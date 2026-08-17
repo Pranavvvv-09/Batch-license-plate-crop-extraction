@@ -1,0 +1,1554 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>sang_det — plate extraction & AI labeling</title>
+<style>
+  :root {
+    --bg: #0e1116; --panel: #161b22; --panel-2: #1c232d; --line: #2a323d;
+    --text: #e6edf3; --muted: #8b98a5; --accent: #4b9fff; --accent-dim: #1f3a5f;
+    --ok: #3fb950; --warn: #d29922; --err: #f85149; --run: #4b9fff; --nvidia: #76b900;
+    --radius: 10px; --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  :root[data-theme="light"] {
+    --bg: #f6f8fa; --panel: #ffffff; --panel-2: #f0f3f6; --line: #d8dee4;
+    --text: #1f2328; --muted: #636c76; --accent: #0969da; --accent-dim: #ddf4ff;
+    --ok: #1a7f37; --warn: #9a6700; --err: #cf222e; --run: #0969da; --nvidia: #5c9300;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  header {
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    padding: 12px 20px; border-bottom: 1px solid var(--line); background: var(--panel);
+    position: sticky; top: 0; z-index: 30;
+  }
+  header h1 { font-size: 16px; margin: 0; letter-spacing: .3px; display: flex; align-items: center; gap: 6px; }
+  header h1 span { color: var(--muted); font-weight: 400; }
+  .spacer { flex: 1; }
+  .pill {
+    font: 600 11px/1 var(--mono); text-transform: uppercase; letter-spacing: .6px;
+    padding: 6px 10px; border-radius: 999px; border: 1px solid var(--line);
+    background: var(--panel-2); color: var(--muted); white-space: nowrap;
+  }
+  .pill.running { color: var(--run); border-color: var(--run); }
+  .pill.paused  { color: var(--warn); border-color: var(--warn); }
+  .pill.error, .pill.disk-full { color: var(--err); border-color: var(--err); }
+  .pill.idle    { color: var(--muted); }
+  .pill.nvidia  { color: var(--nvidia); border-color: color-mix(in srgb, var(--nvidia) 40%, transparent); }
+
+  .nav-tabs {
+    display: flex; gap: 8px; padding: 10px 20px; background: var(--panel);
+    border-bottom: 1px solid var(--line);
+  }
+  .nav-tab {
+    background: transparent; border: 1px solid transparent; border-radius: 7px;
+    color: var(--muted); padding: 7px 16px; font-size: 13px; font-weight: 600;
+    cursor: pointer; transition: all .15s ease; display: inline-flex; align-items: center; gap: 6px;
+  }
+  .nav-tab:hover { background: var(--panel-2); color: var(--text); }
+  .nav-tab.active { background: var(--panel-2); color: var(--accent); border-color: var(--line); }
+  .nav-tab.active.nvidia-tab { color: var(--nvidia); }
+
+  main { max-width: 1540px; margin: 0 auto; padding: 20px; display: grid; gap: 18px; }
+  .view-container { display: grid; gap: 18px; }
+  .view-container.hidden { display: none; }
+
+  .grid-2 { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 18px; }
+  @media (max-width: 1080px) { .grid-2 { grid-template-columns: 1fr; } }
+
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); }
+  .card > h2 {
+    margin: 0; padding: 12px 16px; font-size: 12px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: .8px; color: var(--muted);
+    border-bottom: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between;
+  }
+  .card > .body { padding: 16px; }
+
+  textarea, input[type=text], input[type=password], select {
+    background: var(--bg); color: var(--text); border: 1px solid var(--line);
+    border-radius: 8px; font: 13px var(--mono);
+  }
+  textarea { width: 100%; min-height: 130px; resize: vertical; padding: 11px 12px; font-family: var(--mono); line-height: 1.6; }
+  input[type=text], input[type=password], select { padding: 8px 12px; width: 100%; }
+  textarea:focus, input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+
+  button {
+    font: 600 13px/1 inherit; padding: 9px 15px; border-radius: 7px; cursor: pointer;
+    background: var(--accent); color: #fff; border: 1px solid transparent; transition: opacity .15s, transform .05s;
+  }
+  button:hover:not(:disabled) { opacity: .92; }
+  button:active:not(:disabled) { transform: translateY(1px); }
+  button.ghost { background: transparent; color: var(--text); border-color: var(--line); }
+  button.ghost:hover { background: var(--panel-2); }
+  button.success { background: var(--ok); color: #fff; }
+  button.nvidia-btn { background: var(--nvidia); color: #000; font-weight: 700; }
+  button.danger { background: var(--err); color: #fff; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button.tiny { font-size: 11px; padding: 5px 9px; }
+
+  .row { display: flex; gap: 9px; align-items: center; flex-wrap: wrap; }
+  .stats {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 1px;
+    background: var(--line); border-radius: var(--radius); overflow: hidden; border: 1px solid var(--line);
+  }
+  .stat { background: var(--panel); padding: 14px 16px; }
+  .stat .v { font: 700 24px/1.2 var(--mono); letter-spacing: -.5px; }
+  .stat .k { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .7px; margin-top: 4px; }
+  .stat.hero .v { color: var(--ok); }
+  .stat.nvidia-stat .v { color: var(--nvidia); }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { padding: 9px 12px; text-align: left; border-bottom: 1px solid var(--line); vertical-align: middle; }
+  th {
+    font-size: 10px; text-transform: uppercase; letter-spacing: .7px; color: var(--muted); font-weight: 600;
+    position: sticky; top: 0; background: var(--panel); z-index: 2;
+  }
+  tbody tr:hover { background: var(--panel-2); }
+  td.num { font-family: var(--mono); text-align: right; font-variant-numeric: tabular-nums; }
+  .title-cell { max-width: 320px; }
+  .title-cell .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .title-cell .u { font: 11px var(--mono); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .err-text { color: var(--err); font: 11px var(--mono); word-break: break-word; white-space: normal; }
+
+  .badge {
+    display: inline-block; font: 600 10px/1 var(--mono); text-transform: uppercase;
+    letter-spacing: .5px; padding: 4px 8px; border-radius: 5px; border: 1px solid;
+  }
+  .badge.pending { color: var(--muted); border-color: var(--line); }
+  .badge.processing, .badge.scanning { color: var(--run); border-color: var(--run); }
+  .badge.done, .badge.labeled { color: var(--ok); border-color: var(--ok); }
+  .badge.unlabeled { color: var(--warn); border-color: var(--warn); }
+  .badge.error { color: var(--err); border-color: var(--err); }
+  .badge.cancelled { color: var(--muted); border-color: var(--line); opacity: .7; }
+
+  .bar { height: 6px; background: var(--panel-2); border-radius: 4px; overflow: hidden; margin-top: 6px; }
+  .bar > i { display: block; height: 100%; background: var(--run); transition: width .3s ease; }
+  .bar.nvidia-bar > i { background: var(--nvidia); }
+
+  .scroll { max-height: 520px; overflow: auto; }
+  .cfg { display: grid; grid-template-columns: 1fr auto; gap: 9px 12px; align-items: center; }
+  .cfg label { font-size: 12px; color: var(--muted); }
+  .cfg input[type=number], .cfg select {
+    width: 110px; padding: 6px 8px; background: var(--bg); color: var(--text);
+    border: 1px solid var(--line); border-radius: 6px; font: 12px var(--mono); text-align: right;
+  }
+  .cfg input[type=checkbox] { width: 16px; height: 16px; accent-color: var(--accent); }
+  .cfg hr { grid-column: 1 / -1; border: 0; border-top: 1px solid var(--line); margin: 5px 0; width: 100%; }
+
+  .thumbs { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 8px; }
+  .thumb {
+    background: var(--panel-2); border: 1px solid var(--line); border-radius: 7px;
+    overflow: hidden; cursor: pointer; position: relative; transition: border-color .15s;
+  }
+  .thumb:hover { border-color: var(--accent); }
+  .thumb img { width: 100%; height: 50px; object-fit: contain; background: #000; display: block; }
+  .thumb .meta {
+    font: 10px var(--mono); color: var(--muted); padding: 4px 6px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .thumb .plate-tag {
+    position: absolute; top: 4px; left: 4px; background: rgba(0,0,0,0.8);
+    color: var(--nvidia); font: 700 9px var(--mono); padding: 2px 4px; border-radius: 4px;
+    border: 1px solid var(--nvidia);
+  }
+
+  .log { font: 11.5px/1.7 var(--mono); max-height: 230px; overflow: auto; }
+  .log div { padding: 2px 0; border-bottom: 1px solid var(--line); }
+  .log .lv { display: inline-block; width: 62px; color: var(--muted); }
+  .log .error .lv { color: var(--err); } .log .warning .lv { color: var(--warn); }
+
+  .banner {
+    padding: 11px 14px; border-radius: 8px; font-size: 13px; margin-bottom: 14px;
+    border: 1px solid; display: none;
+  }
+  .banner.err { color: var(--err); border-color: var(--err); background: color-mix(in srgb, var(--err) 10%, transparent); }
+  .banner.ok  { color: var(--ok);  border-color: var(--ok);  background: color-mix(in srgb, var(--ok) 10%, transparent); }
+
+  .empty { padding: 30px; text-align: center; color: var(--muted); font-size: 13px; }
+  .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin-bottom: 14px; }
+  .tab-btn {
+    background: transparent; border: none; border-bottom: 2px solid transparent;
+    color: var(--muted); border-radius: 0; padding: 7px 14px; font-size: 12px; font-weight: 600;
+    cursor: pointer; transition: color .15s, border-color .15s;
+  }
+  .tab-btn:hover { color: var(--text); background: transparent; }
+  .tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .tab-content { display: none; }
+  .tab-content.active { display: block; }
+
+  .drive-input {
+    width: 100%; padding: 10px 12px; background: var(--bg); color: var(--text);
+    border: 1px solid var(--line); border-radius: 8px; font: 13px var(--mono);
+  }
+  .drive-panel {
+    background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px;
+    padding: 12px; margin-top: 12px;
+  }
+  .drive-files { max-height: 180px; overflow-y: auto; font: 11px var(--mono); margin-top: 10px; }
+  .drive-file-item {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 5px 8px; border-bottom: 1px solid var(--line);
+  }
+  .drive-file-item:last-child { border-bottom: none; }
+
+  /* AI Labeler Specific Styles */
+  .dropzone {
+    border: 2px dashed var(--line); border-radius: 10px; padding: 24px 20px;
+    text-align: center; cursor: pointer; transition: border-color .2s, background .2s;
+    background: var(--panel-2);
+  }
+  .dropzone:hover, .dropzone.dragover {
+    border-color: var(--nvidia); background: color-mix(in srgb, var(--nvidia) 8%, transparent);
+  }
+  .dropzone-icon { font-size: 28px; margin-bottom: 6px; }
+
+  .plate-input-cell {
+    display: flex; align-items: center; gap: 6px;
+  }
+  .plate-input {
+    font: 700 13px var(--mono); padding: 5px 8px; width: 140px;
+    background: var(--bg); color: #fff; border: 1px solid var(--line); border-radius: 5px;
+    text-transform: uppercase; letter-spacing: 1px;
+  }
+  .plate-input:focus { border-color: var(--nvidia); outline: 2px solid var(--nvidia); }
+  .plate-img-cell {
+    width: 90px; height: 38px; object-fit: contain; background: #000;
+    border-radius: 5px; cursor: pointer; border: 1px solid var(--line);
+  }
+
+  /* Modal Lightbox */
+  .modal-backdrop {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.85); backdrop-filter: blur(4px);
+    z-index: 100; display: none; align-items: center; justify-content: center; padding: 20px;
+  }
+  .modal-content {
+    background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+    max-width: 680px; width: 100%; padding: 20px; position: relative;
+  }
+  .modal-img {
+    width: 100%; max-height: 380px; object-fit: contain; background: #000;
+    border-radius: 8px; margin: 12px 0; border: 1px solid var(--line);
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>sang_det <span>/ plate extraction & AI OCR</span></h1>
+  <span class="pill" id="workerPill">connecting</span>
+  <span class="pill nvidia" id="nimPill">NIM: Nemotron-3</span>
+  <span class="pill" id="devicePill">device —</span>
+  <span class="pill" id="diskPill">disk —</span>
+  <div class="spacer"></div>
+  <button class="ghost tiny" id="themeBtn">theme</button>
+  <button class="ghost tiny" id="retryBtn">retry errored</button>
+  <button class="tiny" id="pauseBtn">pause</button>
+</header>
+
+<div class="nav-tabs">
+  <button class="nav-tab active" id="viewExtractionBtn" type="button">🎬 Extraction & Stream Pipeline</button>
+  <button class="nav-tab nvidia-tab" id="viewLabelerBtn" type="button">⚡ AI Plate Labeler (NVIDIA NIM)</button>
+</div>
+
+<main>
+  <div class="banner" id="banner"></div>
+
+  <!-- VIEW 1: EXTRACTION PIPELINE -->
+  <div class="view-container" id="viewExtraction">
+    <div class="stats" id="stats"></div>
+
+    <div class="grid-2">
+      <section class="card">
+        <h2>Add sources</h2>
+        <div class="body">
+          <div class="tabs">
+            <button class="tab-btn active" id="tabUrlsBtn" type="button">Links / Streams</button>
+            <button class="tab-btn" id="tabDriveBtn" type="button">Google Drive (Folder / Images)</button>
+          </div>
+
+          <div class="tab-content active" id="tabUrls">
+            <textarea id="urls" spellcheck="false"
+              placeholder="Paste one link per line — YouTube, Google Drive, or direct .mp4/.m3u8/.jpg links.
+
+https://www.youtube.com/watch?v=...
+https://drive.google.com/drive/folders/...
+https://drive.google.com/file/d/...
+https://example.com/traffic-cam.mp4"></textarea>
+            <div class="row" style="margin-top:11px">
+              <button id="submitBtn">Queue sources</button>
+              <span class="muted" id="submitNote">Duplicates already queued or finished are skipped.</span>
+            </div>
+          </div>
+
+          <div class="tab-content" id="tabDrive">
+            <label style="font-size:12px; color:var(--muted); display:block; margin-bottom:6px">Google Drive folder or file link (Shared as "Anyone with the link"):</label>
+            <input type="text" class="drive-input" id="gdriveUrl" placeholder="https://drive.google.com/drive/folders/... or https://drive.google.com/file/d/..." spellcheck="false" />
+            <div class="row" style="margin-top:11px">
+              <button id="gdriveScanBtn" type="button">Scan Drive Folder</button>
+              <span class="muted" id="gdriveScanNote">Discovers images and videos without downloading up-front.</span>
+            </div>
+            <div class="drive-panel" id="gdrivePanel" style="display:none">
+              <div class="row" style="justify-content:space-between; margin-bottom:8px">
+                <div>
+                  <strong id="gdriveSummaryTitle">Drive Scan Results</strong>
+                  <div class="row" style="gap:6px; margin-top:4px" id="gdriveBadges"></div>
+                </div>
+                <div class="row">
+                  <label style="font-size:12px; cursor:pointer" class="row">
+                    <input type="checkbox" id="gdriveOnlyImages" checked /> Images only
+                  </label>
+                  <button id="gdriveQueueBtn" class="tiny" style="background:var(--ok)" type="button">Queue scanned items</button>
+                </div>
+              </div>
+              <div class="drive-files" id="gdriveFileList"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Tuning <span class="muted" style="text-transform:none;letter-spacing:0">— writes to config.yaml</span></h2>
+        <div class="body">
+          <div class="cfg" id="cfg"></div>
+          <div class="row" style="margin-top:13px">
+            <button id="saveCfgBtn">Save settings</button>
+            <span class="muted" id="cfgNote"></span>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <section class="card">
+      <h2>Videos</h2>
+      <div class="scroll">
+        <table>
+          <thead>
+            <tr>
+              <th style="width:44px">ID</th>
+              <th style="width:96px">Status</th>
+              <th>Source</th>
+              <th style="width:88px" class="num">Frames</th>
+              <th style="width:88px" class="num">Plates</th>
+              <th style="width:76px" class="num">Dupes</th>
+              <th style="width:88px" class="num">Elapsed</th>
+              <th style="width:150px"></th>
+            </tr>
+          </thead>
+          <tbody id="videoRows"><tr><td colspan="8" class="empty">No videos queued yet.</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <div class="grid-2">
+      <section class="card">
+        <h2>Latest saved crops</h2>
+        <div class="body"><div class="thumbs" id="thumbs"></div></div>
+      </section>
+      <section class="card">
+        <h2>Activity</h2>
+        <div class="body"><div class="log" id="log"></div></div>
+      </section>
+    </div>
+  </div>
+
+  <!-- VIEW 2: AI PLATE LABELER (NVIDIA NIM) -->
+  <div class="view-container hidden" id="viewLabeler">
+    <!-- NVIDIA NIM Stats -->
+    <div class="stats" id="labelerStats">
+      <div class="stat nvidia-stat"><div class="v" id="lblTotal">0</div><div class="k">Total Crops</div></div>
+      <div class="stat hero"><div class="v" id="lblLabeled">0</div><div class="k">Labeled with NIM</div></div>
+      <div class="stat"><div class="v" id="lblUnlabeled">0</div><div class="k">Unlabeled</div></div>
+      <div class="stat"><div class="v" id="lblErrors">0</div><div class="k">OCR Errors</div></div>
+    </div>
+
+    <div class="grid-2">
+      <!-- NVIDIA NIM API Settings -->
+      <section class="card">
+        <h2>NVIDIA NIM Configuration <span class="muted" style="text-transform:none;letter-spacing:0">— nemotron-3-nano-omni-30b-a3b-reasoning</span></h2>
+        <div class="body">
+          <div style="display:grid; gap:12px">
+            <div>
+              <label style="font-size:12px; color:var(--muted); display:block; margin-bottom:5px">NVIDIA NIM API Key:</label>
+              <div class="row">
+                <input type="password" id="nimApiKey" placeholder="nvapi-..." spellcheck="false" style="flex:1" />
+                <button class="ghost tiny" id="toggleKeyBtn" type="button">Show</button>
+                <button class="tiny" id="saveKeyBtn" type="button">Save Key</button>
+              </div>
+              <span class="muted" style="font-size:11px; margin-top:4px; display:block">Get your free NIM key from <a href="https://build.nvidia.com" target="_blank" style="color:var(--nvidia)">build.nvidia.com</a>.</span>
+            </div>
+
+            <div class="row">
+              <div style="flex:1">
+                <label style="font-size:12px; color:var(--muted); display:block; margin-bottom:5px">NIM Model Preset / Custom:</label>
+                <div class="row" style="gap:6px">
+                  <select id="nimModelPreset" style="width:230px; font-size:12px">
+                    <option value="nvidia/nemotron-3-nano-omni-30b-a3b-reasoning">nvidia/nemotron-3-nano-omni-30b-a3b-reasoning (Default)</option>
+                    <option value="meta/llama-3.2-11b-vision-instruct">meta/llama-3.2-11b-vision-instruct (Fast VLM)</option>
+                    <option value="meta/llama-3.2-90b-vision-instruct">meta/llama-3.2-90b-vision-instruct</option>
+                    <option value="nvidia/neva-22b">nvidia/neva-22b</option>
+                    <option value="microsoft/phi-3.5-vision-instruct">microsoft/phi-3.5-vision-instruct</option>
+                    <option value="custom">Custom Model ID...</option>
+                  </select>
+                  <input type="text" id="nimModel" value="nvidia/nemotron-3-nano-omni-30b-a3b-reasoning" spellcheck="false" style="flex:1" />
+                </div>
+              </div>
+            </div>
+
+            <div>
+              <label style="font-size:12px; color:var(--muted); display:block; margin-bottom:5px">Extraction Prompt:</label>
+              <input type="text" id="nimPrompt" value="Extract and output only the license plate alphanumeric text from this image. Output uppercase text with standard spacing. If unreadable, output UNREADABLE. Do not include any explanations or other text." spellcheck="false" />
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Upload Output Images & Folders Directly -->
+      <section class="card">
+        <h2>Upload & Import Images / Folders <span class="muted" style="text-transform:none;letter-spacing:0">— auto-OCR & import to CSV</span></h2>
+        <div class="body">
+          <div class="tabs">
+            <button class="tab-btn active" id="tabLblUploadBtn" type="button">Upload Files & Folders</button>
+            <button class="tab-btn" id="tabLblLocalBtn" type="button">Local Directory Path</button>
+            <button class="tab-btn" id="tabLblDriveBtn" type="button">Google Drive Folder</button>
+          </div>
+
+          <!-- TAB 1: BROWSER UPLOAD / DRAG & DROP FOLDERS -->
+          <div class="tab-content active" id="tabLblUpload">
+            <div class="dropzone" id="uploadDropzone">
+              <div class="dropzone-icon">📁</div>
+              <strong>Drag & Drop plate images or entire folders here</strong>
+              <div class="muted" style="font-size:12px; margin-top:4px">Supports JPEG, PNG, WebP crops & nested folder uploads</div>
+              <div class="row" style="justify-content:center; gap:10px; margin-top:12px">
+                <button type="button" class="tiny ghost" id="chooseFilesBtn">📷 Choose Files</button>
+                <button type="button" class="tiny nvidia-btn" id="chooseFolderBtn">📁 Choose Folder</button>
+              </div>
+              <input type="file" id="fileUploadInput" multiple accept="image/*" style="display:none" />
+              <input type="file" id="folderUploadInput" webkitdirectory directory multiple style="display:none" />
+            </div>
+            <div class="row" style="margin-top:10px; justify-content:space-between">
+              <label style="font-size:12px; cursor:pointer" class="row">
+                <input type="checkbox" id="autoScanOnUpload" checked /> Auto-scan with NVIDIA NIM on upload
+              </label>
+              <span class="muted" id="uploadStatusText" style="font-size:12px"></span>
+            </div>
+          </div>
+
+          <!-- TAB 2: LOCAL DIRECTORY PATH -->
+          <div class="tab-content" id="tabLblLocal">
+            <label style="font-size:12px; color:var(--muted); display:block; margin-bottom:6px">Local folder path on disk containing plate crop images:</label>
+            <div class="row" style="gap:8px">
+              <input type="text" id="localFolderPath" placeholder="C:\path\to\plate_images or ./data/crops" spellcheck="false" style="flex:1" />
+              <button class="tiny ghost" id="localFolderScanBtn" type="button">Scan Folder</button>
+              <button class="tiny nvidia-btn" id="localFolderImportBtn" type="button">Import Images</button>
+            </div>
+            <div class="row" style="margin-top:10px; justify-content:space-between">
+              <div class="row" style="gap:14px">
+                <label style="font-size:12px; cursor:pointer" class="row">
+                  <input type="checkbox" id="localFolderRecursive" checked /> Recursive (include subfolders)
+                </label>
+                <label style="font-size:12px; cursor:pointer" class="row">
+                  <input type="checkbox" id="localFolderAutoScan" checked /> Auto-scan with NIM
+                </label>
+              </div>
+              <span class="muted" id="localFolderStatusText" style="font-size:12px"></span>
+            </div>
+            <div class="drive-panel" id="localFolderPanel" style="display:none">
+              <div class="row" style="justify-content:space-between; margin-bottom:8px">
+                <div>
+                  <strong id="localFolderSummaryTitle">Discovered Images in Folder</strong>
+                  <div class="row" style="gap:6px; margin-top:4px" id="localFolderBadges"></div>
+                </div>
+              </div>
+              <div class="drive-files" id="localFolderFileList"></div>
+            </div>
+          </div>
+
+          <!-- TAB 3: GOOGLE DRIVE FOLDER -->
+          <div class="tab-content" id="tabLblDrive">
+            <label style="font-size:12px; color:var(--muted); display:block; margin-bottom:6px">Google Drive shared folder link with plate images:</label>
+            <input type="text" class="drive-input" id="lblGdriveUrl" placeholder="https://drive.google.com/drive/folders/..." spellcheck="false" />
+            <div class="row" style="margin-top:10px; justify-content:space-between">
+              <div class="row" style="gap:10px">
+                <button id="lblGdriveImportBtn" class="nvidia-btn tiny" type="button">⚡ Import Drive Images into Labeler</button>
+                <label style="font-size:12px; cursor:pointer" class="row">
+                  <input type="checkbox" id="lblGdriveAutoScan" checked /> Auto-scan with NIM
+                </label>
+              </div>
+              <span class="muted" id="lblGdriveStatusText" style="font-size:12px"></span>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <!-- Batch Scanner Bar -->
+    <section class="card">
+      <h2>Batch OCR & Manifest Operations</h2>
+      <div class="body">
+        <div class="row" style="justify-content:space-between; margin-bottom:12px">
+          <div class="row" style="gap:8px">
+            <button class="nvidia-btn" id="batchScanBtn" type="button">⚡ Scan All Unlabeled Plates</button>
+            <button class="ghost" id="batchScanAllBtn" type="button">Force Re-scan All</button>
+            <button class="danger tiny" id="cancelBatchBtn" type="button" style="display:none">Cancel Batch</button>
+          </div>
+          <div class="row" style="gap:8px">
+            <button class="ghost" id="exportCsvBtn" type="button">📥 Export CSV</button>
+            <button class="ghost" id="importCsvBtn" type="button">📤 Import CSV</button>
+            <button class="ghost danger" id="resetLabelerBtn" type="button">🗑️ Clear / New Session</button>
+            <input type="file" id="csvFileInput" accept=".csv" style="display:none" />
+          </div>
+        </div>
+
+        <div id="batchProgressContainer" style="display:none; background:var(--panel-2); padding:12px; border-radius:8px; border:1px solid var(--line)">
+          <div class="row" style="justify-content:space-between; font-size:12px">
+            <strong id="batchProgressLabel" style="color:var(--nvidia)">NVIDIA NIM Batch Scanning in Progress...</strong>
+            <span id="batchProgressCount" class="num">0 / 0 (0%)</span>
+          </div>
+          <div class="bar nvidia-bar"><i id="batchProgressBar" style="width:0%"></i></div>
+          <div class="row" style="justify-content:space-between; font-size:11px; color:var(--muted); margin-top:6px">
+            <span id="batchCurrentFile"></span>
+            <span id="batchTimeInfo"></span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Plates Table & Labels Editor -->
+    <section class="card">
+      <h2>
+        <span>Extracted Plates & AI Labels</span>
+        <div class="row" style="gap:10px">
+          <input type="text" id="labelSearch" placeholder="Search plate text or file..." style="width:200px; padding:4px 8px; font-size:12px" />
+          <select id="labelStatusFilter" style="width:130px; padding:4px 8px; font-size:12px">
+            <option value="all">All Plates</option>
+            <option value="unlabeled">Unlabeled only</option>
+            <option value="labeled">Labeled only</option>
+            <option value="error">Errors only</option>
+          </select>
+        </div>
+      </h2>
+      <div class="scroll">
+        <table>
+          <thead>
+            <tr>
+              <th style="width:50px">ID</th>
+              <th style="width:100px">Crop</th>
+              <th style="width:170px">License Plate Text</th>
+              <th style="width:96px">Status</th>
+              <th>Filename / Source</th>
+              <th style="width:80px" class="num">Confidence</th>
+              <th style="width:80px" class="num">Time</th>
+              <th style="width:160px">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="labelPlateRows"><tr><td colspan="8" class="empty">No plate crops loaded.</td></tr></tbody>
+        </table>
+      </div>
+      <div class="row" style="padding:10px 16px; justify-content:space-between; border-top:1px solid var(--line); font-size:12px">
+        <span class="muted" id="labelPaginationInfo">Showing 0-0 of 0</span>
+        <div class="row" style="gap:6px">
+          <button class="ghost tiny" id="lblPrevBtn">Previous</button>
+          <button class="ghost tiny" id="lblNextBtn">Next</button>
+        </div>
+      </div>
+    </section>
+  </div>
+</main>
+
+<!-- Lightbox Modal -->
+<div class="modal-backdrop" id="imgModal">
+  <div class="modal-content">
+    <div class="row" style="justify-content:space-between">
+      <strong id="modalTitle">Plate Crop Detail</strong>
+      <button class="ghost tiny" id="modalCloseBtn">✕</button>
+    </div>
+    <img src="" class="modal-img" id="modalImg" alt="Plate preview" />
+    <div class="row" style="justify-content:space-between; font-size:13px">
+      <div class="plate-input-cell">
+        <label>Plate Text:</label>
+        <input type="text" class="plate-input" id="modalPlateInput" />
+        <button class="tiny success" id="modalSaveBtn">Save</button>
+      </div>
+      <button class="nvidia-btn tiny" id="modalScanBtn">⚡ Re-scan with NIM</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+  "use strict";
+  const $ = (id) => document.getElementById(id);
+  const POLL_MS = 2500;
+  let latest = null, cfgBuilt = false, cfgDirty = false, inFlight = false;
+  let labelOffset = 0, labelLimit = 50, currentModalPlateId = null;
+
+  const nfmt = (n) => (n ?? 0).toLocaleString();
+  const bytes = (n) => {
+    if (!n) return "0 B";
+    const u = ["B","KB","MB","GB","TB"]; let i = 0;
+    while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+    return n.toFixed(i ? 1 : 0) + " " + u[i];
+  };
+  const dur = (s) => {
+    if (s == null) return "—";
+    s = Math.max(0, Math.round(s));
+    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+    return h ? `${h}h ${m}m` : (m ? `${m}m ${s % 60}s` : `${s}s`);
+  };
+  const esc = (s) => String(s ?? "").replace(/[&<>"']/g,
+    (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
+
+  function banner(msg, kind) {
+    const el = $("banner");
+    if (!msg) { el.style.display = "none"; return; }
+    el.textContent = msg;
+    el.className = "banner " + (kind || "ok");
+    el.style.display = "block";
+    if (kind === "ok") setTimeout(() => { el.style.display = "none"; }, 5000);
+  }
+
+  async function api(path, opts) {
+    const res = await fetch(path, {
+      headers: opts?.body instanceof FormData ? {} : { "Content-Type": "application/json" },
+      ...opts,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || data.error || res.statusText);
+    return data;
+  }
+
+  // ---- Navigation Views ----------------------------------------------
+  $("viewExtractionBtn").addEventListener("click", () => {
+    $("viewExtractionBtn").classList.add("active");
+    $("viewLabelerBtn").classList.remove("active");
+    $("viewExtraction").classList.remove("hidden");
+    $("viewLabeler").classList.add("hidden");
+  });
+
+  $("viewLabelerBtn").addEventListener("click", () => {
+    $("viewLabelerBtn").classList.add("active");
+    $("viewExtractionBtn").classList.remove("active");
+    $("viewLabeler").classList.remove("hidden");
+    $("viewExtraction").classList.add("hidden");
+    refreshLabeler();
+  });
+
+  // ---- config panel -------------------------------------------------
+  const FIELDS = [
+    ["sampling.fps", "Frames sampled per second", "number", { step: 0.1, min: 0.05 }],
+    ["detector.confidence", "Detection confidence", "number", { step: 0.01, min: 0.01, max: 0.99 }],
+    ["detector.imgsz", "Inference size (px)", "number", { step: 32, min: 320 }],
+    ["detector.batch_size", "Batch size", "number", { step: 1, min: 1 }],
+    ["sep1"],
+    ["filters.min_box_width", "Min plate width (px)", "number", { step: 1, min: 1 }],
+    ["filters.min_box_height", "Min plate height (px)", "number", { step: 1, min: 1 }],
+    ["filters.crop_padding_px", "Crop padding (px)", "number", { step: 1, min: 0 }],
+    ["sep2"],
+    ["quality.enabled", "Quality gate on", "checkbox"],
+    ["quality.min_laplacian_variance", "Min sharpness (Laplacian)", "number", { step: 1, min: 0 }],
+    ["sep3"],
+    ["dedup.enabled", "Deduplication on", "checkbox"],
+    ["dedup.hash_distance", "Dedup hash distance", "number", { step: 1, min: 0, max: 64 }],
+    ["dedup.window_size", "Dedup window (crops)", "number", { step: 10, min: 1 }],
+    ["dedup.window_seconds", "Dedup window (video secs)", "number", { step: 5, min: 0 }],
+    ["dedup.scope", "Dedup scope", "select", { options: ["video", "global"] }],
+    ["sep4"],
+    ["output.jpeg_quality", "JPEG quality", "number", { step: 1, min: 40, max: 100 }],
+    ["storage.min_free_gb", "Pause below free GB", "number", { step: 0.5, min: 0 }],
+    ["runtime.max_plates_per_video", "Max plates / video (0 = ∞)", "number", { step: 100, min: 0 }],
+  ];
+
+  const dig = (obj, path) => path.split(".").reduce((o, k) => (o == null ? o : o[k]), obj);
+
+  function buildConfig(cfg) {
+    const host = $("cfg");
+    host.innerHTML = "";
+    for (const [key, label, type, opts] of FIELDS) {
+      if (key.startsWith("sep")) { host.insertAdjacentHTML("beforeend", "<hr>"); continue; }
+      const lab = document.createElement("label");
+      lab.textContent = label; lab.htmlFor = "cfg_" + key;
+      let input;
+      if (type === "select") {
+        input = document.createElement("select");
+        for (const o of opts.options) {
+          const opt = document.createElement("option");
+          opt.value = o; opt.textContent = o; input.appendChild(opt);
+        }
+      } else {
+        input = document.createElement("input");
+        input.type = type;
+        Object.entries(opts || {}).forEach(([k, v]) => input.setAttribute(k, v));
+      }
+      input.id = "cfg_" + key; input.dataset.key = key;
+      input.addEventListener("input", () => { cfgDirty = true; });
+      host.appendChild(lab); host.appendChild(input);
+    }
+    applyConfig(cfg);
+    cfgBuilt = true;
+  }
+
+  function applyConfig(cfg) {
+    if (cfgDirty) return;
+    for (const [key, , type] of FIELDS) {
+      if (key.startsWith("sep")) continue;
+      const el = $("cfg_" + key);
+      if (!el) continue;
+      const value = dig(cfg, key);
+      if (type === "checkbox") el.checked = !!value;
+      else el.value = value ?? "";
+    }
+    // Set NIM config fields if not dirty
+    if (cfg?.labeler) {
+      if (!$("nimApiKey").value && cfg.labeler.api_key) $("nimApiKey").value = cfg.labeler.api_key;
+      if (cfg.labeler.model) $("nimModel").value = cfg.labeler.model;
+      if (cfg.labeler.prompt) $("nimPrompt").value = cfg.labeler.prompt;
+    }
+  }
+
+  $("saveCfgBtn").addEventListener("click", async () => {
+    const changes = {};
+    for (const [key, , type] of FIELDS) {
+      if (key.startsWith("sep")) continue;
+      const el = $("cfg_" + key);
+      if (!el) continue;
+      changes[key] = type === "checkbox" ? el.checked
+        : (type === "number" ? Number(el.value) : el.value);
+    }
+    try {
+      await api("/api/config", { method: "PUT", body: JSON.stringify({ changes }) });
+      cfgDirty = false;
+      $("cfgNote").textContent = "saved " + new Date().toLocaleTimeString();
+      banner("Settings written to config.yaml.", "ok");
+    } catch (e) { banner("Could not save settings: " + e.message, "err"); }
+  });
+
+  // ---- NIM Config Save ----------------------------------------------
+  $("saveKeyBtn").addEventListener("click", async () => {
+    const key = $("nimApiKey").value.trim();
+    const model = $("nimModel").value.trim();
+    const prompt = $("nimPrompt").value.trim();
+    try {
+      await api("/api/config", {
+        method: "PUT",
+        body: JSON.stringify({
+          changes: {
+            "labeler.api_key": key,
+            "labeler.model": model,
+            "labeler.prompt": prompt,
+          }
+        })
+      });
+      banner("NVIDIA NIM configuration saved to config.yaml.", "ok");
+    } catch (e) { banner("Could not save NIM settings: " + e.message, "err"); }
+  });
+
+  $("toggleKeyBtn").addEventListener("click", () => {
+    const el = $("nimApiKey");
+    const isPw = el.type === "password";
+    el.type = isPw ? "text" : "password";
+    $("toggleKeyBtn").textContent = isPw ? "Hide" : "Show";
+  });
+
+  $("nimModelPreset").addEventListener("change", () => {
+    const val = $("nimModelPreset").value;
+    if (val !== "custom") {
+      $("nimModel").value = val;
+    }
+  });
+
+  // ---- tabs ---------------------------------------------------------
+  $("tabUrlsBtn").addEventListener("click", () => {
+    $("tabUrlsBtn").classList.add("active");
+    $("tabDriveBtn").classList.remove("active");
+    $("tabUrls").classList.add("active");
+    $("tabDrive").classList.remove("active");
+  });
+
+  $("tabDriveBtn").addEventListener("click", () => {
+    $("tabDriveBtn").classList.add("active");
+    $("tabUrlsBtn").classList.remove("active");
+    $("tabDrive").classList.add("active");
+    $("tabUrls").classList.remove("active");
+  });
+
+  // ---- submit sources -----------------------------------------------
+  $("submitBtn").addEventListener("click", async () => {
+    const box = $("urls");
+    const text = box.value.trim();
+    if (!text) { banner("Paste at least one link first.", "err"); return; }
+    const btn = $("submitBtn");
+    btn.disabled = true; btn.textContent = "Queueing…";
+    try {
+      const r = await api("/api/videos", { method: "POST", body: JSON.stringify({ urls: text }) });
+      box.value = "";
+      banner(`Queued ${r.added} source(s)${r.skipped ? `, skipped ${r.skipped} duplicate(s)` : ""}.`, "ok");
+      refresh();
+    } catch (e) { banner("Submit failed: " + e.message, "err"); }
+    finally { btn.disabled = false; btn.textContent = "Queue sources"; }
+  });
+
+  // ---- gdrive scan & queue -------------------------------------------
+  let scannedDriveData = null;
+
+  $("gdriveScanBtn").addEventListener("click", async () => {
+    const url = $("gdriveUrl").value.trim();
+    if (!url) { banner("Please enter a Google Drive folder or file link.", "err"); return; }
+    const btn = $("gdriveScanBtn");
+    btn.disabled = true; btn.textContent = "Scanning folder…";
+    $("gdriveScanNote").textContent = "Connecting to Google Drive...";
+    try {
+      const data = await api("/api/gdrive/scan", { method: "POST", body: JSON.stringify({ url }) });
+      scannedDriveData = data;
+      renderDriveResults(data);
+      $("gdrivePanel").style.display = "block";
+      $("gdriveScanNote").textContent = "Scan complete.";
+      banner(`Discovered ${data.total} item(s) (${data.images_count} image(s), ${data.videos_count} video(s)).`, "ok");
+    } catch (e) {
+      banner("Google Drive scan failed: " + e.message, "err");
+      $("gdriveScanNote").textContent = "Scan failed.";
+    } finally {
+      btn.disabled = false; btn.textContent = "Scan Drive Folder";
+    }
+  });
+
+  function renderDriveResults(data) {
+    $("gdriveSummaryTitle").textContent = data.kind === "folder" ? `Folder: ${data.folder_id}` : "Single Drive File";
+    $("gdriveBadges").innerHTML = `
+      <span class="badge ${data.images_count ? 'done' : 'pending'}">${data.images_count} image(s)</span>
+      <span class="badge ${data.videos_count ? 'processing' : 'pending'}">${data.videos_count} video(s)</span>
+      <span class="badge pending">${data.total} total</span>
+    `;
+    const list = $("gdriveFileList");
+    if (!data.files || !data.files.length) {
+      list.innerHTML = '<div class="muted" style="padding:8px">No files found.</div>';
+      return;
+    }
+    list.innerHTML = data.files.map(f => `
+      <div class="drive-file-item">
+        <span>${f.type === 'image' ? '🖼️' : (f.type === 'video' ? '🎬' : '📄')} ${esc(f.name)}</span>
+        <span class="badge ${f.type === 'image' ? 'done' : 'processing'}">${esc(f.type)}</span>
+      </div>
+    `).join("");
+  }
+
+  $("gdriveQueueBtn").addEventListener("click", async () => {
+    if (!scannedDriveData) return;
+    const btn = $("gdriveQueueBtn");
+    btn.disabled = true; btn.textContent = "Queueing…";
+    try {
+      const r = await api("/api/gdrive/queue", {
+        method: "POST",
+        body: JSON.stringify({
+          url: $("gdriveUrl").value.trim(),
+          only_images: $("gdriveOnlyImages").checked
+        })
+      });
+      banner(`Queued ${r.added} Google Drive file(s)${r.skipped ? `, skipped ${r.skipped} duplicate(s)` : ""}.`, "ok");
+      refresh();
+    } catch (e) {
+      banner("Queueing Drive files failed: " + e.message, "err");
+    } finally {
+      btn.disabled = false; btn.textContent = "Queue scanned items";
+    }
+  });
+
+  // ---- controls -----------------------------------------------------
+  $("pauseBtn").addEventListener("click", async () => {
+    const action = latest?.worker?.paused ? "resume" : "pause";
+    try { await api("/api/control/" + action, { method: "POST" }); refresh(); }
+    catch (e) { banner(e.message, "err"); }
+  });
+
+  $("retryBtn").addEventListener("click", async () => {
+    try {
+      const r = await api("/api/control/retry-errors", { method: "POST" });
+      banner(`Requeued ${r.requeued} errored video(s).`, "ok");
+      refresh();
+    } catch (e) { banner(e.message, "err"); }
+  });
+
+  $("themeBtn").addEventListener("click", () => {
+    const root = document.documentElement;
+    const next = root.dataset.theme === "dark" ? "light" : "dark";
+    root.dataset.theme = next;
+    try { localStorage.setItem("sang_det_theme", next); } catch {}
+  });
+  try {
+    const saved = localStorage.getItem("sang_det_theme");
+    if (saved) document.documentElement.dataset.theme = saved;
+  } catch {}
+
+  window.videoAction = async (id, action) => {
+    if (action === "delete" && !confirm("Remove this video from the queue?\nSaved crops stay on disk.")) return;
+    try { await api(`/api/videos/${id}/${action}`, { method: "POST" }); refresh(); }
+    catch (e) { banner(e.message, "err"); }
+  };
+
+  // ---- AI Labeler Import Tabs --------------------------------------
+  $("tabLblUploadBtn").addEventListener("click", () => {
+    $("tabLblUploadBtn").classList.add("active");
+    $("tabLblLocalBtn").classList.remove("active");
+    $("tabLblDriveBtn").classList.remove("active");
+    $("tabLblUpload").classList.add("active");
+    $("tabLblLocal").classList.remove("active");
+    $("tabLblDrive").classList.remove("active");
+  });
+
+  $("tabLblLocalBtn").addEventListener("click", () => {
+    $("tabLblLocalBtn").classList.add("active");
+    $("tabLblUploadBtn").classList.remove("active");
+    $("tabLblDriveBtn").classList.remove("active");
+    $("tabLblLocal").classList.add("active");
+    $("tabLblUpload").classList.remove("active");
+    $("tabLblDrive").classList.remove("active");
+  });
+
+  $("tabLblDriveBtn").addEventListener("click", () => {
+    $("tabLblDriveBtn").classList.add("active");
+    $("tabLblUploadBtn").classList.remove("active");
+    $("tabLblLocalBtn").classList.remove("active");
+    $("tabLblDrive").classList.add("active");
+    $("tabLblUpload").classList.remove("active");
+    $("tabLblLocal").classList.remove("active");
+  });
+
+  // ---- AI Labeler Upload & Folder Pickers ----------------------------
+  const dropzone = $("uploadDropzone");
+  const fileInput = $("fileUploadInput");
+  const folderInput = $("folderUploadInput");
+
+  $("chooseFilesBtn").addEventListener("click", (e) => {
+    e.stopPropagation();
+    fileInput.click();
+  });
+
+  $("chooseFolderBtn").addEventListener("click", (e) => {
+    e.stopPropagation();
+    folderInput.click();
+  });
+
+  dropzone.addEventListener("click", (e) => {
+    if (e.target !== $("chooseFilesBtn") && e.target !== $("chooseFolderBtn")) {
+      fileInput.click();
+    }
+  });
+
+  dropzone.addEventListener("dragover", (e) => {
+    e.preventDefault();
+    dropzone.classList.add("dragover");
+  });
+
+  dropzone.addEventListener("dragleave", () => dropzone.classList.remove("dragover"));
+
+  async function getFilesFromDataTransfer(items) {
+    const fileList = [];
+    const queue = [];
+
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      if (item.webkitGetAsEntry) {
+        const entry = item.webkitGetAsEntry();
+        if (entry) queue.push(entry);
+      } else if (item.getAsFile) {
+        const f = item.getAsFile();
+        if (f) fileList.push(f);
+      }
+    }
+
+    async function readEntry(entry) {
+      if (entry.isFile) {
+        return new Promise((resolve) => {
+          entry.file((file) => {
+            fileList.push(file);
+            resolve();
+          }, () => resolve());
+        });
+      } else if (entry.isDirectory) {
+        const dirReader = entry.createReader();
+        const readBatch = () => {
+          return new Promise((resolve) => {
+            dirReader.readEntries(async (entries) => {
+              if (!entries.length) {
+                resolve();
+              } else {
+                for (const child of entries) {
+                  await readEntry(child);
+                }
+                await readBatch();
+                resolve();
+              }
+            }, () => resolve());
+          });
+        };
+        await readBatch();
+      }
+    }
+
+    for (const entry of queue) {
+      await readEntry(entry);
+    }
+    return fileList;
+  }
+
+  dropzone.addEventListener("drop", async (e) => {
+    e.preventDefault();
+    dropzone.classList.remove("dragover");
+    let files = [];
+    if (e.dataTransfer.items && e.dataTransfer.items.length) {
+      files = await getFilesFromDataTransfer(e.dataTransfer.items);
+    } else if (e.dataTransfer.files && e.dataTransfer.files.length) {
+      files = Array.from(e.dataTransfer.files);
+    }
+    const imgExts = [".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff", ".tif", ".jfif", ".heic"];
+    const imgFiles = files.filter(f => imgExts.some(ext => (f.name || "").toLowerCase().endsWith(ext)) || (f.type && f.type.startsWith("image/")));
+    if (imgFiles.length) {
+      uploadImages(imgFiles);
+    } else if (files.length) {
+      banner("No supported image files found in dropped items.", "warn");
+    }
+  });
+
+  fileInput.addEventListener("change", () => {
+    if (fileInput.files.length) uploadImages(fileInput.files);
+  });
+
+  folderInput.addEventListener("change", () => {
+    if (folderInput.files.length) uploadImages(folderInput.files);
+  });
+
+  async function uploadImages(files) {
+    const list = Array.from(files);
+    if (!list.length) return;
+    $("uploadStatusText").textContent = `Uploading ${list.length} image(s)...`;
+    let uploaded = 0, scanned = 0;
+    const autoScan = $("autoScanOnUpload").checked;
+    const apiKey = $("nimApiKey").value.trim();
+
+    for (let i = 0; i < list.length; i++) {
+      const f = list[i];
+      $("uploadStatusText").textContent = `Processing (${i + 1}/${list.length}): ${f.name}...`;
+      const fd = new FormData();
+      fd.append("file", f);
+      fd.append("auto_scan", autoScan ? "true" : "false");
+      fd.append("api_key", apiKey);
+      try {
+        const r = await api("/api/labeler/upload", { method: "POST", body: fd });
+        uploaded++;
+        if (r.scan?.ok) scanned++;
+      } catch (e) {
+        banner(`Upload failed for ${f.name}: ${e.message}`, "err");
+      }
+    }
+    $("uploadStatusText").textContent = `Uploaded ${uploaded} file(s)${autoScan ? ` (${scanned} scanned with NIM)` : ""}.`;
+    banner(`Uploaded ${uploaded} plate image(s)${autoScan ? ` (${scanned} scanned with NIM)` : ""}.`, "ok");
+    fileInput.value = "";
+    folderInput.value = "";
+    refreshLabeler();
+    refreshThumbs();
+  }
+
+  // ---- Local Folder Scanning & Importing ----------------------------
+  let scannedFolderData = null;
+
+  $("localFolderScanBtn").addEventListener("click", async () => {
+    const path = $("localFolderPath").value.trim();
+    if (!path) { banner("Please enter a local directory path.", "err"); return; }
+    const btn = $("localFolderScanBtn");
+    btn.disabled = true; btn.textContent = "Scanning…";
+    $("localFolderStatusText").textContent = "Scanning directory...";
+    try {
+      const data = await api("/api/labeler/scan-folder", {
+        method: "POST",
+        body: JSON.stringify({
+          folder_path: path,
+          recursive: $("localFolderRecursive").checked
+        })
+      });
+      scannedFolderData = data;
+      renderLocalFolderResults(data);
+      $("localFolderPanel").style.display = "block";
+      $("localFolderStatusText").textContent = `Found ${data.total} image file(s).`;
+      banner(`Discovered ${data.total} image(s) in local folder.`, "ok");
+    } catch (e) {
+      banner("Folder scan failed: " + e.message, "err");
+      $("localFolderStatusText").textContent = "Scan failed.";
+    } finally {
+      btn.disabled = false; btn.textContent = "Scan Folder";
+    }
+  });
+
+  function renderLocalFolderResults(data) {
+    $("localFolderSummaryTitle").textContent = `Folder: ${data.path}`;
+    $("localFolderBadges").innerHTML = `<span class="badge ${data.total ? 'done' : 'pending'}">${data.total} image(s) found</span>`;
+    const list = $("localFolderFileList");
+    if (!data.files_preview || !data.files_preview.length) {
+      list.innerHTML = '<div class="muted" style="padding:8px">No image files found in folder.</div>';
+      return;
+    }
+    list.innerHTML = data.files_preview.map(name => `
+      <div class="drive-file-item">
+        <span>🖼️ ${esc(name)}</span>
+        <span class="badge done">image</span>
+      </div>
+    `).join("") + (data.total > data.files_preview.length ? `<div class="muted" style="padding:6px 8px; font-size:11px">+ ${data.total - data.files_preview.length} more file(s)...</div>` : "");
+  }
+
+  $("localFolderImportBtn").addEventListener("click", async () => {
+    const path = $("localFolderPath").value.trim();
+    if (!path) { banner("Please enter a local directory path to import.", "err"); return; }
+    const btn = $("localFolderImportBtn");
+    btn.disabled = true; btn.textContent = "Importing…";
+    $("localFolderStatusText").textContent = "Importing images into labeler...";
+    const autoScan = $("localFolderAutoScan").checked;
+    const apiKey = $("nimApiKey").value.trim();
+
+    try {
+      const r = await api("/api/labeler/import-folder", {
+        method: "POST",
+        body: JSON.stringify({
+          folder_path: path,
+          recursive: $("localFolderRecursive").checked,
+          auto_scan: autoScan,
+          api_key: apiKey
+        })
+      });
+      $("localFolderStatusText").textContent = `Imported ${r.imported} image(s)${autoScan ? ` (${r.scanned} scanned with NIM)` : ""}.`;
+      banner(`Imported ${r.imported} plate image(s)${autoScan ? ` (${r.scanned} scanned with NIM)` : ""}.`, "ok");
+      refreshLabeler();
+      refreshThumbs();
+    } catch (e) {
+      banner("Folder import failed: " + e.message, "err");
+      $("localFolderStatusText").textContent = "Import failed.";
+    } finally {
+      btn.disabled = false; btn.textContent = "Import Images";
+    }
+  });
+
+  // ---- Google Drive Folder Import in Labeler ------------------------
+  $("lblGdriveImportBtn").addEventListener("click", async () => {
+    const url = $("lblGdriveUrl").value.trim();
+    if (!url) { banner("Please enter a Google Drive folder link.", "err"); return; }
+    const btn = $("lblGdriveImportBtn");
+    btn.disabled = true; btn.textContent = "Importing from Drive…";
+    $("lblGdriveStatusText").textContent = "Connecting to Google Drive...";
+    const autoScan = $("lblGdriveAutoScan").checked;
+    const apiKey = $("nimApiKey").value.trim();
+
+    try {
+      const r = await api("/api/labeler/import-gdrive", {
+        method: "POST",
+        body: JSON.stringify({
+          url: url,
+          auto_scan: autoScan,
+          api_key: apiKey
+        })
+      });
+      $("lblGdriveStatusText").textContent = `Imported ${r.imported} Drive image(s)${autoScan ? ` (${r.scanned} scanned with NIM)` : ""}.`;
+      banner(`Imported ${r.imported} image(s) from Google Drive${autoScan ? ` (${r.scanned} scanned with NIM)` : ""}.`, "ok");
+      $("lblGdriveUrl").value = "";
+      refreshLabeler();
+      refreshThumbs();
+    } catch (e) {
+      banner("Google Drive folder import failed: " + e.message, "err");
+      $("lblGdriveStatusText").textContent = "Import failed.";
+    } finally {
+      btn.disabled = false; btn.textContent = "⚡ Import Drive Images into Labeler";
+    }
+  });
+
+  // Batch scan triggers
+  $("batchScanBtn").addEventListener("click", async () => {
+    const key = $("nimApiKey").value.trim();
+    try {
+      await api("/api/labeler/scan-all", {
+        method: "POST",
+        body: JSON.stringify({ force_all: false, api_key: key })
+      });
+      banner("NVIDIA NIM batch OCR scanning started.", "ok");
+      refreshLabelerStatus();
+    } catch (e) { banner("Could not start batch: " + e.message, "err"); }
+  });
+
+  $("batchScanAllBtn").addEventListener("click", async () => {
+    if (!confirm("Re-scan all plates (including already labeled ones)?")) return;
+    const key = $("nimApiKey").value.trim();
+    try {
+      await api("/api/labeler/scan-all", {
+        method: "POST",
+        body: JSON.stringify({ force_all: true, api_key: key })
+      });
+      banner("NVIDIA NIM full re-scan started.", "ok");
+      refreshLabelerStatus();
+    } catch (e) { banner("Could not start batch: " + e.message, "err"); }
+  });
+
+  $("cancelBatchBtn").addEventListener("click", async () => {
+    try {
+      await api("/api/labeler/cancel", { method: "POST" });
+      banner("Cancellation requested.", "ok");
+    } catch (e) { banner("Cancel failed: " + e.message, "err"); }
+  });
+
+  // CSV Export & Import
+  $("exportCsvBtn").addEventListener("click", () => {
+    window.location.href = "/api/labeler/export-csv";
+  });
+
+  $("importCsvBtn").addEventListener("click", () => $("csvFileInput").click());
+  $("csvFileInput").addEventListener("change", async () => {
+    const file = $("csvFileInput").files[0];
+    if (!file) return;
+    const fd = new FormData();
+    fd.append("file", file);
+    try {
+      const r = await api("/api/labeler/import-csv", { method: "POST", body: fd });
+      banner(`Imported CSV: ${r.updated} plate record(s) updated!`, "ok");
+      refreshLabeler();
+    } catch (e) { banner("CSV import failed: " + e.message, "err"); }
+    finally { $("csvFileInput").value = ""; }
+  });
+
+  // Reset / Clear Labeled Data & Session
+  $("resetLabelerBtn").addEventListener("click", async () => {
+    const choice = prompt(
+      "Start a new labeling session?\n\n" +
+      "Type '1' to DELETE ALL plates & crop images (completely fresh start)\n" +
+      "Type '2' to RESET ALL LABELS to unlabeled (keeps images, removes AI/manual text)\n\n" +
+      "Type '1', '2', or cancel:"
+    );
+    if (!choice) return;
+
+    let mode = "";
+    if (choice.trim() === "1" || choice.toLowerCase().includes("delete") || choice.toLowerCase().includes("all")) {
+      if (!confirm("Are you sure you want to permanently delete ALL plate records and crop files?")) return;
+      mode = "clear_all";
+    } else if (choice.trim() === "2" || choice.toLowerCase().includes("reset") || choice.toLowerCase().includes("label")) {
+      if (!confirm("Reset all labels to 'unlabeled'? Crop images will be kept.")) return;
+      mode = "reset_labels";
+    } else {
+      banner("Reset cancelled: invalid option entered.", "warn");
+      return;
+    }
+
+    const btn = $("resetLabelerBtn");
+    btn.disabled = true; btn.textContent = "Resetting…";
+    try {
+      const r = await api("/api/labeler/reset", {
+        method: "POST",
+        body: JSON.stringify({ mode: mode, delete_files: true })
+      });
+      banner(r.message || "Reset complete.", "ok");
+      labelOffset = 0;
+      refreshLabeler();
+      refreshThumbs();
+    } catch (e) {
+      banner("Reset failed: " + e.message, "err");
+    } finally {
+      btn.disabled = false; btn.textContent = "🗑️ Clear / New Session";
+    }
+  });
+
+  // Single plate actions
+  window.scanSinglePlate = async (plateId) => {
+    const key = $("nimApiKey").value.trim();
+    const btn = document.getElementById("scanBtn_" + plateId);
+    if (btn) { btn.disabled = true; btn.textContent = "Scanning…"; }
+    try {
+      const r = await api(`/api/labeler/scan-plate/${plateId}`, {
+        method: "POST",
+        body: JSON.stringify({ api_key: key })
+      });
+      if (r.ok) {
+        banner(`Plate #${plateId} scanned: '${r.plate_text}' (${r.latency_s}s)`, "ok");
+      } else {
+        banner(`Scan error: ${r.error}`, "err");
+      }
+      refreshLabeler();
+    } catch (e) { banner("Scan error: " + e.message, "err"); }
+  };
+
+  window.savePlateText = async (plateId) => {
+    const input = document.getElementById("plateInput_" + plateId);
+    if (!input) return;
+    const text = input.value.trim();
+    try {
+      await api(`/api/labeler/plates/${plateId}`, {
+        method: "PUT",
+        body: JSON.stringify({ plate_text: text })
+      });
+      input.style.borderColor = "var(--ok)";
+      setTimeout(() => { input.style.borderColor = "var(--line)"; }, 1500);
+      banner(`Plate #${plateId} updated.`, "ok");
+      refreshLabelerStats();
+    } catch (e) { banner("Update error: " + e.message, "err"); }
+  };
+
+  window.deletePlateRecord = async (plateId) => {
+    if (!confirm(`Delete plate record #${plateId}?`)) return;
+    try {
+      await api(`/api/labeler/plates/${plateId}`, { method: "DELETE" });
+      banner(`Plate #${plateId} removed.`, "ok");
+      refreshLabeler();
+    } catch (e) { banner("Delete error: " + e.message, "err"); }
+  };
+
+  // Lightbox modal preview
+  window.openPlateModal = (plateId, filename, plateText) => {
+    currentModalPlateId = plateId;
+    $("modalTitle").textContent = `Plate #${plateId} — ${filename}`;
+    $("modalImg").src = `/api/plates/file/${encodeURIComponent(filename)}`;
+    $("modalPlateInput").value = plateText || "";
+    $("imgModal").style.display = "flex";
+  };
+  $("modalCloseBtn").addEventListener("click", () => { $("imgModal").style.display = "none"; });
+  $("imgModal").addEventListener("click", (e) => {
+    if (e.target === $("imgModal")) $("imgModal").style.display = "none";
+  });
+  $("modalSaveBtn").addEventListener("click", async () => {
+    if (!currentModalPlateId) return;
+    const text = $("modalPlateInput").value.trim();
+    try {
+      await api(`/api/labeler/plates/${currentModalPlateId}`, {
+        method: "PUT",
+        body: JSON.stringify({ plate_text: text })
+      });
+      banner(`Plate #${currentModalPlateId} updated.`, "ok");
+      $("imgModal").style.display = "none";
+      refreshLabeler();
+    } catch (e) { banner(e.message, "err"); }
+  });
+  $("modalScanBtn").addEventListener("click", async () => {
+    if (!currentModalPlateId) return;
+    const key = $("nimApiKey").value.trim();
+    const btn = $("modalScanBtn");
+    btn.disabled = true; btn.textContent = "⚡ Scanning…";
+    try {
+      const r = await api(`/api/labeler/scan-plate/${currentModalPlateId}`, {
+        method: "POST",
+        body: JSON.stringify({ api_key: key })
+      });
+      if (r.ok) {
+        $("modalPlateInput").value = r.plate_text;
+        banner(`Extracted: '${r.plate_text}' (${r.latency_s}s)`, "ok");
+        refreshLabeler();
+      } else banner(r.error, "err");
+    } catch (e) { banner(e.message, "err"); }
+    finally { btn.disabled = false; btn.textContent = "⚡ Re-scan with NIM"; }
+  });
+
+  // Filter & Pagination
+  $("labelSearch").addEventListener("input", () => { labelOffset = 0; refreshLabeler(); });
+  $("labelStatusFilter").addEventListener("change", () => { labelOffset = 0; refreshLabeler(); });
+  $("lblPrevBtn").addEventListener("click", () => {
+    if (labelOffset >= labelLimit) { labelOffset -= labelLimit; refreshLabeler(); }
+  });
+  $("lblNextBtn").addEventListener("click", () => {
+    labelOffset += labelLimit; refreshLabeler();
+  });
+
+  // ---- render -------------------------------------------------------
+  function renderStats(t, w) {
+    const kept = t.detections ? Math.round((t.plates / t.detections) * 100) : 0;
+    $("stats").innerHTML = [
+      ["hero", nfmt(t.plates), "plates saved"],
+      ["", nfmt(t.frames), "frames analysed"],
+      ["", nfmt(t.detections), "raw detections"],
+      ["", kept + "%", "detections kept"],
+      ["", nfmt(t.rejected_dupe), "duplicates dropped"],
+      ["", nfmt(t.rejected_blur), "quality rejects"],
+      ["", nfmt(t.rejected_size), "size rejects"],
+      ["", `${t.done}/${t.videos}`, "videos done"],
+      ["", bytes(t.output_bytes), "on disk"],
+      ["", w.free_gb != null ? w.free_gb + " GB" : "—", "disk free"],
+    ].map(([cls, v, k]) =>
+      `<div class="stat ${cls}"><div class="v">${esc(v)}</div><div class="k">${esc(k)}</div></div>`
+    ).join("");
+  }
+
+  function renderVideos(videos) {
+    const body = $("videoRows");
+    if (!videos.length) {
+      body.innerHTML = '<tr><td colspan="8" class="empty">No videos queued yet.</td></tr>';
+      return;
+    }
+    body.innerHTML = videos.map((v) => {
+      const pct = v.progress != null ? Math.round(v.progress * 100) : null;
+      const bar = v.status === "processing" && pct != null
+        ? `<div class="bar"><i style="width:${pct}%"></i></div>` : "";
+      const detail = v.error
+        ? `<div class="err-text">${esc(v.error)}</div>`
+        : `<div class="u">${esc(v.url)}</div>`;
+      const actions = [];
+      if (v.status === "error" || v.status === "cancelled")
+        actions.push(`<button class="ghost tiny" onclick="videoAction(${v.id},'retry')">retry</button>`);
+      if (v.status === "done")
+        actions.push(`<button class="ghost tiny" onclick="videoAction(${v.id},'restart')">redo</button>`);
+      if (v.status === "pending" || v.status === "processing")
+        actions.push(`<button class="ghost tiny" onclick="videoAction(${v.id},'cancel')">cancel</button>`);
+      actions.push(`<button class="ghost tiny" onclick="videoAction(${v.id},'delete')">×</button>`);
+
+      return `<tr>
+        <td class="num muted">${v.id}</td>
+        <td><span class="badge ${esc(v.status)}">${esc(v.status)}</span></td>
+        <td class="title-cell"><div class="t">${esc(v.title || "(resolving…)")}</div>${detail}${bar}</td>
+        <td class="num">${nfmt(v.frames_processed)}</td>
+        <td class="num" style="color:var(--ok)">${nfmt(v.plates_saved)}</td>
+        <td class="num muted">${nfmt(v.rejected_dupe)}</td>
+        <td class="num muted">${dur(v.elapsed_s)}</td>
+        <td><div class="row" style="gap:5px">${actions.join("")}</div></td>
+      </tr>`;
+    }).join("");
+  }
+
+  function renderHeader(w) {
+    const pill = $("workerPill");
+    const state = w.disk_paused ? "disk-full" : (w.paused ? "paused" : w.state);
+    pill.textContent = state;
+    pill.className = "pill " + state;
+    const d = w.detector;
+    $("devicePill").textContent = d ? `${d.device} · ${d.model}` : (w.detector_error ? "no model" : "loading model…");
+    $("diskPill").textContent = w.free_gb != null ? `${w.free_gb} GB free · ${nfmt(w.output_files)} files` : "disk —";
+    $("diskPill").className = "pill" + (w.disk_paused ? " error" : "");
+    $("pauseBtn").textContent = w.paused ? "resume" : "pause";
+    if (w.detector_error) banner("Detector unavailable: " + w.detector_error, "err");
+  }
+
+  async function refreshThumbs() {
+    try {
+      const { plates } = await api("/api/plates/recent?limit=18");
+      $("thumbs").innerHTML = plates.length ? plates.map((p) => `
+        <div class="thumb" onclick="openPlateModal(${p.id}, '${esc(p.filename)}', '${esc(p.plate_text || '')}')">
+          ${p.plate_text ? `<div class="plate-tag">${esc(p.plate_text)}</div>` : ''}
+          <img loading="lazy" src="/api/plates/file/${encodeURIComponent(p.filename)}" alt="plate crop">
+          <div class="meta" title="${esc(p.filename)}">v${p.video_id} · ${dur(p.timestamp_s)} · ${(p.confidence * 100).toFixed(0)}%</div>
+        </div>`).join("")
+        : '<div class="empty" style="grid-column:1/-1">No crops saved yet.</div>';
+    } catch {}
+  }
+
+  async function refreshLog() {
+    try {
+      const { events } = await api("/api/events?limit=40");
+      $("log").innerHTML = events.map((e) => `
+        <div class="${esc(e.level)}">
+          <span class="lv">${esc(e.level)}</span>
+          <span class="muted">${new Date(e.at * 1000).toLocaleTimeString()}</span>
+          ${e.video_id ? `<span class="muted"> v${e.video_id}</span>` : ""}
+          ${esc(e.message)}
+        </div>`).join("") || '<div class="muted">Nothing logged yet.</div>';
+    } catch {}
+  }
+
+  async function refreshLabelerStatus() {
+    try {
+      const data = await api("/api/labeler/status");
+      const st = data.stats || {};
+      $("lblTotal").textContent = nfmt(st.total_plates || 0);
+      $("lblLabeled").textContent = nfmt(st.labeled || 0);
+      $("lblUnlabeled").textContent = nfmt(st.unlabeled || 0);
+      $("lblErrors").textContent = nfmt(st.error || 0);
+
+      const progBox = $("batchProgressContainer");
+      const cancelBtn = $("cancelBatchBtn");
+
+      if (data.running) {
+        progBox.style.display = "block";
+        cancelBtn.style.display = "inline-block";
+        const pct = data.total > 0 ? Math.round((data.processed / data.total) * 100) : 0;
+        $("batchProgressBar").style.width = pct + "%";
+        $("batchProgressCount").textContent = `${data.processed} / ${data.total} (${pct}%)`;
+        $("batchCurrentFile").textContent = data.current_filename ? `Scanning: ${data.current_filename}` : "";
+        $("batchTimeInfo").textContent = `${dur(data.elapsed_s)} elapsed · ${data.succeeded} ok · ${data.failed} err`;
+      } else {
+        cancelBtn.style.display = "none";
+        if (data.processed > 0 && progBox.style.display !== "none") {
+          $("batchProgressLabel").textContent = "NVIDIA NIM Batch OCR Completed";
+          setTimeout(() => { progBox.style.display = "none"; }, 8000);
+        }
+      }
+    } catch {}
+  }
+
+  async function refreshLabeler() {
+    await refreshLabelerStatus();
+    try {
+      const search = $("labelSearch").value.trim();
+      const status = $("labelStatusFilter").value;
+      const data = await api(`/api/labeler/plates?limit=${labelLimit}&offset=${labelOffset}&status=${status}&search=${encodeURIComponent(search)}`);
+
+      const tbody = $("labelPlateRows");
+      if (!data.items || !data.items.length) {
+        tbody.innerHTML = '<tr><td colspan="8" class="empty">No plates match the current filter.</td></tr>';
+        $("labelPaginationInfo").textContent = `Showing 0-0 of ${data.total}`;
+        return;
+      }
+
+      $("labelPaginationInfo").textContent = `Showing ${data.offset + 1}-${Math.min(data.offset + data.items.length, data.total)} of ${data.total}`;
+      $("lblPrevBtn").disabled = data.offset <= 0;
+      $("lblNextBtn").disabled = data.offset + data.items.length >= data.total;
+
+      tbody.innerHTML = data.items.map((p) => {
+        const textVal = p.plate_text || "";
+        const statusCls = p.ocr_status === "labeled" ? "labeled" : (p.ocr_status === "error" ? "error" : "unlabeled");
+        return `<tr>
+          <td class="num muted">${p.id}</td>
+          <td>
+            <img src="/api/plates/file/${encodeURIComponent(p.filename)}" class="plate-img-cell"
+                 onclick="openPlateModal(${p.id}, '${esc(p.filename)}', '${esc(textVal)}')" title="Click to enlarge" />
+          </td>
+          <td>
+            <div class="plate-input-cell">
+              <input type="text" class="plate-input" id="plateInput_${p.id}" value="${esc(textVal)}"
+                     placeholder="UNLABELED" onkeydown="if(event.key==='Enter')savePlateText(${p.id})" />
+              <button class="ghost tiny" onclick="savePlateText(${p.id})" title="Save text">💾</button>
+            </div>
+          </td>
+          <td><span class="badge ${statusCls}">${esc(p.ocr_status || 'unlabeled')}</span></td>
+          <td class="title-cell">
+            <div class="t" title="${esc(p.filename)}">${esc(p.filename)}</div>
+            <div class="u">${esc(p.source_title || p.source_url || '')}</div>
+          </td>
+          <td class="num">${p.confidence ? (p.confidence * 100).toFixed(0) + '%' : '—'}</td>
+          <td class="num muted">${dur(p.timestamp_s)}</td>
+          <td>
+            <div class="row" style="gap:5px">
+              <button class="nvidia-btn tiny" id="scanBtn_${p.id}" onclick="scanSinglePlate(${p.id})">⚡ Scan</button>
+              <button class="ghost tiny" onclick="deletePlateRecord(${p.id})">×</button>
+            </div>
+          </td>
+        </tr>`;
+      }).join("");
+    } catch (e) {
+      console.error("Could not fetch labeler plates:", e);
+    }
+  }
+
+  async function refresh() {
+    if (inFlight) return;
+    inFlight = true;
+    try {
+      const data = await api("/api/status");
+      latest = data;
+      renderHeader(data.worker);
+      renderStats(data.totals, data.worker);
+      renderVideos(data.videos);
+      if (!cfgBuilt) buildConfig(data.config); else applyConfig(data.config);
+      if ($("banner").className.includes("err") &&
+          $("banner").textContent.startsWith("Lost connection")) banner("");
+    } catch (e) {
+      banner("Lost connection to the worker — is run.py still running?", "err");
+    } finally { inFlight = false; }
+  }
+
+  refresh(); refreshThumbs(); refreshLog(); refreshLabelerStatus();
+  setInterval(refresh, POLL_MS);
+  setInterval(refreshThumbs, POLL_MS * 3);
+  setInterval(refreshLog, POLL_MS * 2);
+  setInterval(refreshLabelerStatus, POLL_MS);
+})();
+</script>
+</body>
+</html>

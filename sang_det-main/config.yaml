@@ -1,0 +1,177 @@
+# =========================================================================
+#  sang_det - license plate extraction tool
+#  Every tunable lives here. The dashboard writes back to this same file,
+#  and the worker re-reads it between videos, so edits apply live.
+# =========================================================================
+
+sampling:
+  # Frames analysed per second of source video. 1.0 = one frame/second.
+  # Lower = faster run, fewer plates. Higher = more plates, slower run.
+  fps: 1.0
+  # Downscale long edge before detection (px). Keeps VRAM/CPU bounded on 4K
+  # sources. Crops are taken from THIS frame, so don't go too low.
+  # 0 = keep native resolution.
+  max_frame_width: 1920
+
+detector:
+  # Leave blank to auto-download a pretrained plate detector on first run.
+  # Or point at your own Ultralytics .pt file.
+  model_path: ""
+  # Inference size fed to YOLO. 960 catches smaller/further plates than 640.
+  imgsz: 960
+  # (4) Confidence filtering - drop detections below this. Raise to kill
+  # false positives, lower to catch more plates.
+  confidence: 0.35
+  # Non-max-suppression IoU.
+  iou: 0.45
+  # cuda | mps | cpu | auto
+  device: auto
+  # Frames per inference call. Higher = better GPU utilisation, more VRAM.
+  batch_size: 8
+  # Use fp16 on CUDA/MPS.
+  half: true
+  # Max detections kept per frame.
+  max_detections: 20
+
+filters:
+  # (5) Size filtering - reject boxes smaller than this, in pixels, measured
+  # on the (possibly downscaled) analysis frame.
+  min_box_width: 60
+  min_box_height: 20
+  # Plates are wide. Reject boxes outside this width/height ratio band.
+  min_aspect_ratio: 1.2
+  max_aspect_ratio: 8.0
+  # Reject absurdly large boxes (usually a whole-vehicle false positive),
+  # as a fraction of total frame area.
+  max_area_fraction: 0.25
+  # Pixels of context added around the box before cropping. Small, so the
+  # output stays a plate crop and not a vehicle crop.
+  crop_padding_px: 3
+
+quality:
+  enabled: true
+  # (8) Blur rejection - variance of the Laplacian on the grayscale crop.
+  # Higher threshold = stricter. ~40-80 is a sane band for plate crops.
+  min_laplacian_variance: 45.0
+  # Reject flat/washed-out crops (std-dev of pixel intensity).
+  min_contrast_stddev: 18.0
+  # Reject crops that are almost entirely one colour (occlusion / glare).
+  max_uniform_fraction: 0.92
+  # Final safety net: upscale-only guard, reject crops under this many px.
+  min_crop_pixels: 1200
+
+dedup:
+  enabled: true
+  # (7) Perceptual-hash dedup. Hamming distance <= this counts as a repeat.
+  #
+  # Calibrated, not guessed. At hash_size 8 (64-bit pHash), the same plate
+  # re-photographed across consecutive frames - shifted, rescaled, brighter,
+  # mildly blurred - lands within distance 6, while genuinely different
+  # plates (including ones differing by a single character) stay at 10+.
+  # 7 sits in that gap with margin on both sides.
+  #   Raise  -> more aggressive merging, risks dropping distinct plates.
+  #   Lower  -> keeps more repeats of the same plate.
+  hash_distance: 7
+  # How many recent accepted crops to compare against (rolling window).
+  # 240 covers ~4 min of footage at 1 fps - well past a single pass-by.
+  window_size: 240
+  # Second, independent gate: only treat crops as repeats if they are also
+  # within this many seconds of each other in the SOURCE video. A vehicle
+  # passes in seconds, so this is what makes a loose hash_distance safe - it
+  # stops a plate matching a similar-looking car from minutes earlier.
+  # 0 = no time limit (visual similarity alone decides).
+  window_seconds: 20.0
+  # video  = window resets for each video (recommended)
+  # global = window persists across the whole batch
+  scope: video
+  # phash | dhash | ahash | whash
+  algorithm: phash
+  # COUPLED TO hash_distance - larger hashes need proportionally larger
+  # distances, and above 8 the same-plate / different-plate bands overlap.
+  # Do not change this without re-running the calibration in the README.
+  hash_size: 8
+
+output:
+  # All accepted crops land in this single folder.
+  dir: data/output
+  # (JPEG quality) 100 = biggest/sharpest, 85-92 is the practical sweet spot.
+  jpeg_quality: 92
+  # Optional upscale of very small crops before saving (0 = never upscale).
+  min_save_width: 0
+  # Per-file provenance is written here as JSON Lines.
+  manifest: data/manifest.jsonl
+
+storage:
+  # (Disk guard) Pause saving - never crash - when free space on the output
+  # volume drops below this many GB.
+  min_free_gb: 5.0
+  # How often to re-check free space, in saves.
+  check_every_n_saves: 50
+  # Also re-check at least this often, in seconds.
+  check_every_n_seconds: 60
+
+runtime:
+  # Videos processed at once. 1 is right for a single GPU; raise only if you
+  # are CPU-bound on decode and have VRAM to spare.
+  concurrency: 1
+  # Retry a failed video this many times before marking it errored for good.
+  max_retries: 2
+  retry_backoff_seconds: 20
+  # Give up on a single video after this long (seconds). 0 = no limit.
+  per_video_timeout: 0
+  # Flush progress to SQLite every N analysed frames.
+  checkpoint_every_n_frames: 30
+  # Hard cap on saved crops per video (0 = unlimited).
+  max_plates_per_video: 0
+
+ingest:
+  # Cap the resolution yt-dlp asks for. 1080 is plenty for plate crops and
+  # keeps 10-15h runs from being network-bound.
+  max_height: 1080
+  # Seconds to wait on a stalled network read before failing the video.
+  read_timeout: 90
+  # yt-dlp socket timeout.
+  socket_timeout: 30
+  # Prefer ffmpeg pipe (accurate, resumable). Falls back to OpenCV if the
+  # ffmpeg path cannot be established.
+  prefer_ffmpeg: true
+
+server:
+  host: 127.0.0.1
+  port: 8000
+  # Start the background worker inside the web process. Set false if you
+  # run `python run.py worker` separately.
+  autostart_worker: true
+
+logging:
+  level: INFO
+  file: data/logs/sang_det.log
+  max_bytes: 10485760
+  backup_count: 5
+
+labeler:
+  # Enable/disable NVIDIA NIM automatic OCR plate labeling.
+  enabled: true
+  # NVIDIA NIM API key. Can also be provided via NVIDIA_API_KEY environment variable.
+  api_key: "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"
+  # NVIDIA NIM API endpoint (OpenAI compatible).
+  base_url: "https://integrate.api.nvidia.com/v1"
+  # Default NVIDIA Vision / Reasoning model.
+  model: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"
+  # Fallback model used automatically when primary model is busy/exhausted (503).
+  fallback_model: "meta/llama-3.2-11b-vision-instruct"
+  # System / user extraction prompt.
+  prompt: "Extract and output only the license plate alphanumeric text from this image. Output uppercase text with standard spacing. If unreadable, output UNREADABLE. Do not include any explanations or other text."
+  # Request timeout in seconds.
+  timeout: 60.0
+  # Max thinking/reasoning tokens for Nemotron-3 reasoning models (keeps OCR response fast).
+  reasoning_budget: 128
+  # Model temperature.
+  temperature: 0.1
+  # Max tokens for response.
+  max_tokens: 128
+  # Default CSV path for labels export/sync.
+  csv_path: "data/labels.csv"
+
+
+
