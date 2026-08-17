@@ -71,7 +71,7 @@ class RateLimiter:
             self._last_call_time = time.monotonic()
             return True
 
-    def report_rate_limit(self, penalty_seconds: float) -> None:
+    def report_rate_limit(self, penalty_seconds: float = 2.0) -> None:
         with self._lock:
             self._rate_limit_hits += 1
             now = time.monotonic()
@@ -477,11 +477,11 @@ class NimLabeler:
                     )
 
                 if exc.code in (429, 503, 502, 504):
-                    if self.rate_limiter:
-                        self.rate_limiter.report_rate_limit()
                     # Progressive exponential backoff with jitter
                     jitter = random.uniform(0.5, 1.5)
                     backoff = min(max_delay, base_delay * (2 ** (attempt - 1)) + jitter)
+                    if self.rate_limiter:
+                        self.rate_limiter.report_rate_limit(penalty_seconds=backoff)
                     log.warning(
                         "NVIDIA NIM server busy/queue exhausted (HTTP %d, attempt %d/%d). Pausing for %.2fs...",
                         exc.code, attempt, max_retries, backoff,

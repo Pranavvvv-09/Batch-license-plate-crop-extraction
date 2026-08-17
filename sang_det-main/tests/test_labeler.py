@@ -265,13 +265,47 @@ class TestLabeler(unittest.TestCase):
         limiter.wait()
         self.assertEqual(limiter.rate_limit_hits, 0)
 
-        # Trigger rate limit penalty
+        # Trigger rate limit penalty with explicit duration
         limiter.report_rate_limit(0.05)
         self.assertEqual(limiter.rate_limit_hits, 1)
         t0 = labeler.time.time()
         limiter.wait()
         elapsed = labeler.time.time() - t0
         self.assertGreaterEqual(elapsed, 0.04)
+
+        # Trigger rate limit penalty with default duration
+        limiter.report_rate_limit()
+        self.assertEqual(limiter.rate_limit_hits, 2)
+
+    @patch("time.sleep")
+    @patch("urllib.request.urlopen")
+    def test_nim_scan_503_rate_limit(self, mock_urlopen, mock_sleep):
+        import urllib.error
+        import io
+
+        # 503 error on first call, success on second
+        mock_503 = urllib.error.HTTPError(
+            url="http://mock",
+            code=503,
+            msg="Service Unavailable",
+            hdrs={},
+            fp=io.BytesIO(b"Service Unavailable"),
+        )
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.read.return_value = b'{"choices":[{"message":{"content":"DL 1A AA 1111"}}]}'
+
+        mock_urlopen.side_effect = [mock_503, mock_resp]
+        mock_resp.__enter__.return_value = mock_resp
+
+        limiter = labeler.RateLimiter(rps=100.0, min_delay_s=0.01)
+        client = labeler.NimLabeler(rate_limiter=limiter)
+        valid_jpeg = make_valid_test_jpeg()
+
+        res = client.scan_image_bytes(valid_jpeg, api_key="nvapi-mock-key")
+        self.assertTrue(res.ok)
+        self.assertEqual(res.plate_text, "DL 1A AA 1111")
+        self.assertEqual(limiter.rate_limit_hits, 1)
 
     @patch("app.db.get_label_stats")
     @patch("app.db.get_unlabeled_plates")
