@@ -71,7 +71,7 @@ class RateLimiter:
             self._last_call_time = time.monotonic()
             return True
 
-    def report_rate_limit(self, penalty_seconds: float = 2.0) -> None:
+    def report_rate_limit(self, penalty_seconds: float = 2.0) -> None:  # default keeps old callers safe
         with self._lock:
             self._rate_limit_hits += 1
             now = time.monotonic()
@@ -265,28 +265,42 @@ class KeyPool:
             return list(self._keys)
 
     def get_next_key(self) -> str:
-        """Return the next healthy key in round-robin order."""
+        """Return the next healthy key in round-robin order, or '' if all are exhausted."""
         with self._lock:
             if not self._keys:
                 return ""
             healthy = [k for k in self._keys if k not in self._exhausted_keys]
             if not healthy:
-                # If all were marked exhausted, reset to give them another try
-                self._exhausted_keys.clear()
-                healthy = list(self._keys)
+                # All keys are exhausted — do NOT auto-reset here.
+                # Callers check active_count == 0 and handle appropriately.
+                return ""
 
             key = healthy[self._index % len(healthy)]
             self._index += 1
             return key
 
+    def reset_exhausted(self) -> None:
+        """Manually reset the exhausted-key set (e.g. after a cool-down period)."""
+        with self._lock:
+            self._exhausted_keys.clear()
+            self._index = 0
+            log.info("API key pool exhausted-set cleared; all %d key(s) re-activated.", len(self._keys))
+
+    @property
+    def all_exhausted(self) -> bool:
+        """True when every key in the pool has been marked exhausted."""
+        with self._lock:
+            return bool(self._keys) and len(self._exhausted_keys) >= len(self._keys)
+
     def mark_exhausted(self, key: str) -> None:
         with self._lock:
             if key in self._keys:
                 self._exhausted_keys.add(key)
+                active = max(0, len(self._keys) - len(self._exhausted_keys))
                 log.warning(
                     "API key %s... marked exhausted/unauthorized. Remaining active keys in pool: %d/%d",
                     key[:12],
-                    self.active_count,
+                    active,
                     len(self._keys),
                 )
 
@@ -470,9 +484,13 @@ class NimLabeler:
                         log.info("API key failed authorization; rotating to next active key in pool...")
                         current_key = self.get_api_key().strip()
                         continue
+                    log.error(
+                        "All NVIDIA NIM API keys in the pool are invalid or expired (HTTP 403). "
+                        "Aborting — update your API keys in config/environment."
+                    )
                     return ScanResult(
                         ok=False,
-                        error="Authentication failed: all NVIDIA NIM API keys in the pool are invalid or expired.",
+                        error="ALL_KEYS_EXHAUSTED: all NVIDIA NIM API keys in the pool are invalid or expired.",
                         latency_s=total_latency,
                     )
 
@@ -724,71 +742,91 @@ class BatchLabeler:
 
         offset = 0
         processed_count = 0
+        all_keys_dead = False
 
-        while processed_count < limit:
-            if self._cancel_flag.is_set():
-                log.info("NIM batch labeling cancelled by user.")
-                break
-
-            fetch_limit = min(chunk_size, limit - processed_count)
-            if force_all:
-                chunk, _ = db.list_plates(limit=fetch_limit, offset=offset)
-                offset += len(chunk)
-            else:
-                chunk = db.get_unlabeled_plates(limit=fetch_limit, include_errors=retry_errors)
-
-            if not chunk:
-                log.info("Queue empty: all plates processed.")
-                break
-
-            for p in chunk:
+        try:
+            while processed_count < limit:
                 if self._cancel_flag.is_set():
-                    log.info("NIM batch labeling cancelled mid-chunk.")
+                    log.info("NIM batch labeling cancelled by user.")
                     break
 
-                plate_id = p["id"]
-                filename = p["filename"]
+                fetch_limit = min(chunk_size, limit - processed_count)
+                if force_all:
+                    chunk, _ = db.list_plates(limit=fetch_limit, offset=offset)
+                    offset += len(chunk)
+                else:
+                    chunk = db.get_unlabeled_plates(limit=fetch_limit, include_errors=retry_errors)
 
-                with self._lock:
-                    self._status["current_filename"] = filename
-
-                # Rate limiting spacing with instant cancellation check
-                if not limiter.wait(self._cancel_flag):
-                    log.info("NIM batch labeling cancelled during rate limit pause.")
+                if not chunk:
+                    log.info("Queue empty: all plates processed.")
                     break
 
-                # Process single image (with exponential backoff & memory cleanup)
-                res = client.scan_plate_record(plate_id)
+                for p in chunk:
+                    if self._cancel_flag.is_set():
+                        log.info("NIM batch labeling cancelled mid-chunk.")
+                        break
 
-                processed_count += 1
-                with self._lock:
-                    self._status["processed"] = processed_count
-                    self._status["pending"] = max(0, target_total - processed_count)
-                    self._status["rate_limit_hits"] = limiter.rate_limit_hits
-                    if res.ok:
-                        self._status["succeeded"] += 1
-                    else:
-                        self._status["failed"] += 1
-                        self._status["last_error"] = res.error
+                    plate_id = p["id"]
+                    filename = p["filename"]
 
-                # Periodically sync labels to CSV
-                if processed_count % 25 == 0:
-                    sync_labels_csv(cfg)
+                    with self._lock:
+                        self._status["current_filename"] = filename
 
-        # Final CSV sync
-        sync_labels_csv(cfg)
+                    # Rate limiting spacing with instant cancellation check
+                    if not limiter.wait(self._cancel_flag):
+                        log.info("NIM batch labeling cancelled during rate limit pause.")
+                        break
 
-        with self._lock:
-            self._status["running"] = False
-            self._status["current_filename"] = ""
-            log.info(
-                "NIM batch OCR completed: %d/%d processed (%d succeeded, %d failed, %d rate-limit hits)",
-                self._status["processed"],
-                self._status["total"],
-                self._status["succeeded"],
-                self._status["failed"],
-                self._status["rate_limit_hits"],
-            )
+                    # Process single image (with exponential backoff & memory cleanup)
+                    res = client.scan_plate_record(plate_id)
+
+                    processed_count += 1
+                    with self._lock:
+                        self._status["processed"] = processed_count
+                        self._status["pending"] = max(0, target_total - processed_count)
+                        self._status["rate_limit_hits"] = limiter.rate_limit_hits
+                        if res.ok:
+                            self._status["succeeded"] += 1
+                        else:
+                            self._status["failed"] += 1
+                            self._status["last_error"] = res.error
+
+                    # Abort entire batch if all API keys are dead (no point continuing)
+                    if res.error and res.error.startswith("ALL_KEYS_EXHAUSTED"):
+                        log.error(
+                            "Stopping batch: all NVIDIA NIM API keys are exhausted. "
+                            "Update your API keys and restart the batch."
+                        )
+                        all_keys_dead = True
+                        break
+
+                    # Periodically sync labels to CSV
+                    if processed_count % 25 == 0:
+                        sync_labels_csv(cfg)
+
+                if all_keys_dead:
+                    break
+
+        except Exception:  # noqa: BLE001
+            log.exception("Unhandled exception in NIM batch labeler thread — batch aborted.")
+            with self._lock:
+                self._status["last_error"] = "Internal error: see server logs for details."
+
+        finally:
+            # Final CSV sync
+            sync_labels_csv(cfg)
+
+            with self._lock:
+                self._status["running"] = False
+                self._status["current_filename"] = ""
+                log.info(
+                    "NIM batch OCR completed: %d/%d processed (%d succeeded, %d failed, %d rate-limit hits)",
+                    self._status["processed"],
+                    self._status["total"],
+                    self._status["succeeded"],
+                    self._status["failed"],
+                    self._status["rate_limit_hits"],
+                )
 
 
 
