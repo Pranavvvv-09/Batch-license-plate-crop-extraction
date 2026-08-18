@@ -157,9 +157,9 @@ labeler:
   # NVIDIA NIM API endpoint (OpenAI compatible).
   base_url: "https://integrate.api.nvidia.com/v1"
   # Default NVIDIA Vision / Reasoning model.
-  model: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"
+  model: "meta/llama-3.2-11b-vision-instruct"
   # Fallback model used automatically when primary model is busy/exhausted (503).
-  fallback_model: "meta/llama-3.2-11b-vision-instruct"
+  fallback_model: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"
   # System / user extraction prompt.
   prompt: "Extract and output only the license plate alphanumeric text from this image. Output uppercase text with standard spacing. If unreadable, output UNREADABLE. Do not include any explanations or other text."
   # Request timeout in seconds.
@@ -173,7 +173,7 @@ labeler:
   # Default CSV path for labels export/sync.
   csv_path: "data/labels.csv"
   # Rate limiting (requests per second allowed for single NIM key)
-  rate_limit_rps: 1.5
+  rate_limit_rps: 2.0
   # Minimum seconds to pause between consecutive requests
   min_delay_s: 0.0
   # Automatic retry attempts for 429/503/network errors
